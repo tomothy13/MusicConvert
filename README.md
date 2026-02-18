@@ -1,31 +1,59 @@
-# MusicConvert — Quick Usage
+# MusicConvert — Setup & Quick Usage
 
-This repository provides a lightweight web service to convert YouTube playlists/albums into iPod-friendly M4A audio and package results as a ZIP.
+A small FastAPI-based service that converts YouTube videos/playlists to iPod-friendly M4A and packages results as a ZIP.
 
-Usage (local development)
+## Setup (recommended for homelab)
 
-1. Create and activate a Python virtualenv in the project directory:
+Download and run the installer script on your Linux host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tomothy13/MusicConvert/main/setup_service.sh -o setup_service.sh
+bash setup_service.sh
+```
+
+This will create a `venv`, install Python dependencies, detect your LAN IP, and install a `systemd` service named `musicconvert`.
+
+Service logs:
+- System journal: `sudo journalctl -u musicconvert -f`
+- Project rotating log: `error.log` in the repository root
+
+To uninstall, download and run the teardown script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tomothy13/MusicConvert/main/teardown_service.sh -o teardown_service.sh
+bash teardown_service.sh
+```
+
+## Quick local usage
+
+For local development or a quick test:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-2. Run the web UI locally:
-
-```bash
 WEB_HOST=127.0.0.1 WEB_PORT=8000 python web.py
 ```
 
-3. Open http://127.0.0.1:8000 in your browser, paste links (one per line), submit and watch live progress. When the job completes you will be given a ZIP download link.
+Open http://127.0.0.1:8000, paste links (one per line), submit, and watch live progress. When finished, download the ZIP.
 
-Logs & outputs
+## Files & logs
 
-- Per-job outputs and generated ZIPs: `web_output/` in the project root.
-- Server error log (rotating): `error.log` in the project root.
+- Outputs and ZIPs: `web_output/`
+- Server/runtime log: `error.log` (rotating file in project root)
+- Setup/teardown script logs (on installer host): `/var/log/musicconvert-setup.log` and `/var/log/musicconvert-teardown.log` if writable, otherwise `setup.log`/`teardown.log` next to the scripts.
 
-If you prefer to run this as a long-lived service on a Linux host, see the setup instructions in `README-SETUP.md`.
+## Troubleshooting (short)
+
+- If the web UI is unreachable from LAN, ensure the service bound to the LAN IP (printed by setup) or change `WEB_HOST` in the systemd unit to `0.0.0.0`.
+- If ffmpeg is missing, install it manually (`apt install ffmpeg` on Debian/Ubuntu) before running the setup script.
+- Check `sudo journalctl -u musicconvert` for runtime errors.
+
+## Links
+
+- Setup script (raw): https://raw.githubusercontent.com/tomothy13/MusicConvert/main/setup_service.sh
+- Teardown script (raw): https://raw.githubusercontent.com/tomothy13/MusicConvert/main/teardown_service.sh
+
 MusicConvert — macOS packaging
 
 Building a macOS .app with py2app
