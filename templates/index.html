@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MusicConvert — Local UI</title>
+  <style>
+    body{font-family:system-ui, -apple-system, sans-serif; margin:20px}
+    textarea{width:100%;height:120px}
+    #log{white-space:pre-wrap;background:#111;color:#eee;padding:10px;height:240px;overflow:auto}
+    button{padding:8px 12px;margin-top:8px}
+  </style>
+</head>
+<body>
+  <h2>MusicConvert — Local UI</h2>
+  <p>Paste one or more links (comma or newline separated), then click <em>Start</em>.</p>
+  <form id="form">
+    <textarea name="links" id="links" placeholder="https://youtube.com/...\nhttps://youtube.com/playlist?list=..."></textarea>
+    <br>
+    <button type="submit">Start</button>
+  </form>
+  <h3>Job log</h3>
+  <div id="log">Idle.</div>
+  <div id="download" style="margin-top:8px"></div>
+
+<script>
+const form = document.getElementById('form');
+const log = document.getElementById('log');
+const download = document.getElementById('download');
+
+function append(msg){
+  log.textContent += '\n' + msg;
+  log.scrollTop = log.scrollHeight;
+}
+
+form.addEventListener('submit', async (ev) =>{
+  ev.preventDefault();
+  log.textContent = '';
+  download.innerHTML = '';
+  const data = new FormData(form);
+  const res = await fetch('/enqueue', { method:'POST', body: data });
+  const json = await res.json();
+  if(json.job_id){
+    const jid = json.job_id;
+    append('Job started: ' + jid);
+    const ws = new WebSocket(`ws://${location.host}/ws/${jid}`);
+    ws.onmessage = (ev) => {
+      const txt = ev.data;
+      if(txt === 'ZIP_CREATED') append('ZIP created on server');
+      else if(txt.startsWith('ZIP_READY:')){
+        const name = txt.split(':',2)[1];
+        download.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
+      } else if(txt === '__DONE__'){
+        append('Job complete');
+        ws.close();
+      } else {
+        append(txt);
+      }
+    };
+    ws.onerror = (e)=> append('WebSocket error');
+    ws.onclose = ()=> append('WS closed');
+  } else {
+    append('Failed to start job');
+  }
+});
+</script>
+</body>
+</html>

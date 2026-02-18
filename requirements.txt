@@ -1,0 +1,6 @@
+yt-dlp
+# Optional/development: py2app is used to build the macOS .app
+py2app
+fastapi
+uvicorn[standard]
+jinja2
