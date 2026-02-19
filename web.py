@@ -13,6 +13,8 @@ from logging.handlers import RotatingFileHandler
 
 from main import download_url_to_m4a
 from logging_setup import setup_logging
+from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata
+import sqlite3
 
 # ----------------------
 # Configuration & Setup
@@ -23,6 +25,10 @@ OUTPUT_ROOT.mkdir(exist_ok=True)
 
 # Initialize centralized logging for the web process
 logger = setup_logging('musicconvert.web')
+
+# Initialize SQLite DB
+DB_PATH = HERE / 'musicconvert.db'
+db_conn = init_db(DB_PATH)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -152,6 +158,30 @@ class MusicConvertServer:
             logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
             await q.put(f'Failed to create ZIP: {e}')
 
+        # Populate DB with albums/songs found in job_dir
+        try:
+            await q.put('Indexing files into database...')
+            # Use db_conn created at module scope
+            conn = db_conn
+            # Scan directories: each subdirectory is treated as an album
+            for entry in job_dir.iterdir():
+                if entry.is_dir():
+                    album_name = entry.name
+                    album_id = create_album(conn, album_name, str(entry))
+                    for f in entry.rglob('*.m4a'):
+                        meta = extract_metadata(str(f))
+                        add_song(conn, album_id, f.name, str(f), meta)
+                elif entry.is_file() and entry.suffix.lower() in ('.m4a', '.m4a'):
+                    # single-file downloads: create an album for the job if needed
+                    album_name = f'job_{job_id}'
+                    album_id = create_album(conn, album_name, str(job_dir))
+                    meta = extract_metadata(str(entry))
+                    add_song(conn, album_id, entry.name, str(entry), meta)
+            await q.put('Indexing complete')
+        except Exception as e:
+            logger.exception('Failed to index job %s into database: %s', job_id, e)
+            await q.put(f'Indexing error: {e}')
+
         await q.put('__DONE__')
 
 
@@ -163,6 +193,64 @@ app.get('/')(server.index)
 app.post('/enqueue')(server.enqueue)
 app.websocket('/ws/{job_id}')(server.ws_handler)
 app.get('/download/{job_id}')(server.download)
+
+# API: albums listing and album detail
+@app.get('/api/albums')
+async def api_albums():
+    try:
+        albums = list_albums(db_conn)
+        return {'albums': albums}
+    except Exception as e:
+        logger.exception('api_albums error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/api/albums/{album_id}')
+async def api_album(album_id: int):
+    try:
+        album = get_album(db_conn, album_id)
+        if not album:
+            return {'error': 'not_found'}
+        return album
+    except Exception as e:
+        logger.exception('api_album error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/download/song/{song_id}')
+async def download_song(song_id: int):
+    try:
+        song = get_song(db_conn, song_id)
+        if not song:
+            return {'status': 'not_found'}
+        path = song.get('filepath')
+        if not path or not Path(path).exists():
+            return {'status': 'missing'}
+        return FileResponse(path, filename=song.get('filename'))
+    except Exception as e:
+        logger.exception('download_song error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/download/album/{album_id}')
+async def download_album(album_id: int):
+    try:
+        album = get_album(db_conn, album_id)
+        if not album:
+            return {'status': 'not_found'}
+        # create a zip in OUTPUT_ROOT
+        zip_name = f'album_{album_id}.zip'
+        zip_path = OUTPUT_ROOT / zip_name
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for s in album.get('songs', []):
+                fp = Path(s['filepath'])
+                if fp.exists():
+                    arcname = fp.name
+                    zf.write(fp, arcname=arcname)
+        return FileResponse(str(zip_path), filename=zip_name, media_type='application/zip')
+    except Exception as e:
+        logger.exception('download_album error: %s', e)
+        return {'error': str(e)}
 
 
 if __name__ == '__main__':

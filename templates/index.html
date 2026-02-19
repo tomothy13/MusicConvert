@@ -21,6 +21,11 @@
   <h3>Job log</h3>
   <div id="log">Idle.</div>
   <div id="download" style="margin-top:8px"></div>
+  <h3 style="margin-top:18px">Albums</h3>
+  <div>
+    <button id="refreshAlbums">Refresh Albums</button>
+    <div id="albums" style="margin-top:8px"></div>
+  </div>
 
 <script>
 const form = document.getElementById('form');
@@ -62,6 +67,48 @@ form.addEventListener('submit', async (ev) =>{
     append('Failed to start job');
   }
 });
+
+  // Albums UI
+  document.getElementById('refreshAlbums').addEventListener('click', async ()=>{
+    const out = document.getElementById('albums');
+    out.textContent = 'Loading...';
+    const res = await fetch('/api/albums');
+    const json = await res.json();
+    out.innerHTML = '';
+    if(json.albums && json.albums.length){
+      json.albums.forEach(a => {
+        const div = document.createElement('div');
+        div.innerHTML = `<strong>${a.name}</strong> <a href="#" data-id="${a.id}" class="view">View</a> <a href="/download/album/${a.id}">Download ZIP</a>`;
+        out.appendChild(div);
+      });
+      // attach click handlers
+      out.querySelectorAll('.view').forEach(el => el.addEventListener('click', async (ev)=>{
+        ev.preventDefault();
+        const id = ev.target.getAttribute('data-id');
+        const res = await fetch('/api/albums/' + id);
+        const album = await res.json();
+        const details = document.createElement('div');
+        details.innerHTML = `<h4>${album.name}</h4>`;
+        const list = document.createElement('ul');
+        album.songs.forEach(s => {
+          const li = document.createElement('li');
+          const title = s.title || s.filename;
+          li.innerHTML = `${title} - <a href="/download/song/${s.id}">Download</a>`;
+          list.appendChild(li);
+        });
+        // replace albums div with details temporarily
+        out.innerHTML = '';
+        out.appendChild(details);
+        out.appendChild(list);
+        const back = document.createElement('div');
+        back.innerHTML = '<a href="#" id="backToAlbums">Back to albums</a>';
+        out.appendChild(back);
+        document.getElementById('backToAlbums').addEventListener('click', (e)=>{ e.preventDefault(); document.getElementById('refreshAlbums').click(); });
+      }));
+    } else {
+      out.textContent = 'No albums found.';
+    }
+  });
 </script>
 </body>
 </html>
