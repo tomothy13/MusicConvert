@@ -11,10 +11,10 @@ import queue
 import logging
 from logging.handlers import RotatingFileHandler
 
-from main import download_url_to_m4a
+from main import download_url_to_m4a, sanitize_filename
 from logging_setup import setup_logging
-from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata
-from db import list_songs
+from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata, update_album_art, add_link
+from db import list_songs, list_links
 from mutagen.mp4 import MP4
 import sqlite3
 import yt_dlp
@@ -132,6 +132,10 @@ class MusicConvertServer:
                         cur.execute('SELECT id FROM albums WHERE lower(name) = ?', (probe_title.lower(),))
                         if cur.fetchone():
                             await q.put(f'[{idx}/{len(links)}] Skipping: album "{probe_title}" already exists in database')
+                            try:
+                                add_link(conn, link, 'skipped:album_exists')
+                            except Exception:
+                                pass
                             continue
                     except Exception:
                         pass
@@ -159,6 +163,10 @@ class MusicConvertServer:
 
                 if already_seen:
                     await q.put(f'[{idx}/{len(links)}] Skipping: link already processed previously')
+                    try:
+                        add_link(conn, link, 'skipped:already_seen')
+                    except Exception:
+                        pass
                     continue
 
                 # Create a thread-safe queue for progress messages from the downloader
@@ -180,15 +188,27 @@ class MusicConvertServer:
                 forwarder = asyncio.create_task(_forward_thread_q(thread_q, q))
 
                 # run blocking download in threadpool and forward its progress
+                try:
+                    add_link(conn, link, 'queued')
+                except Exception:
+                    pass
                 ok = await asyncio.to_thread(download_url_to_m4a, link, str(job_dir), archive_file, error_file, thread_q)
 
                 # wait for forwarder to finish consuming progress messages
                 await forwarder
 
                 await q.put(f'[{idx}/{len(links)}] Finished: {link} -> {"OK" if ok else "FAILED"}')
+                try:
+                    add_link(conn, link, 'success' if ok else 'failed')
+                except Exception:
+                    pass
             except Exception as e:
                 logger.exception('Error processing link %s for job %s: %s', link, job_id, e)
                 await q.put(f'[{idx}/{len(links)}] Exception: {e}')
+                try:
+                    add_link(conn, link, f'error:{e}')
+                except Exception:
+                    pass
 
         # create zip archive
         zip_name = f'music_{job_id}.zip'
@@ -217,9 +237,31 @@ class MusicConvertServer:
                 if entry.is_dir():
                     album_name = entry.name
                     album_id = create_album(conn, album_name, str(entry))
+                    # collect potential album artist/cover from first song
+                    album_artist = None
+                    album_art = None
                     for f in entry.rglob('*.m4a'):
                         meta = extract_metadata(str(f))
-                        add_song(conn, album_id, f.name, str(f), meta)
+                        sid = add_song(conn, album_id, f.name, str(f), meta)
+                        # try to read embedded cover using mutagen
+                        try:
+                            m = MP4(str(f))
+                            covr = m.tags.get('covr') if m.tags else None
+                            if covr and len(covr) > 0 and album_art is None:
+                                album_art = covr[0]
+                        except Exception:
+                            pass
+                        if not album_artist and meta.get('artist'):
+                            album_artist = meta.get('artist')
+                    # update album with artist and art blob if found
+                    if album_id:
+                        try:
+                            if album_art:
+                                update_album_art(conn, album_id, album_artist, album_art)
+                            elif album_artist:
+                                update_album_art(conn, album_id, album_artist, None)
+                        except Exception:
+                            pass
                 elif entry.is_file() and entry.suffix.lower() in ('.m4a', '.m4a'):
                     # single-file downloads: create an album for the job if needed
                     album_name = f'job_{job_id}'
@@ -295,6 +337,31 @@ async def api_cover(song_id: int):
         return Response(status_code=500)
 
 
+@app.get('/api/album-cover/{album_id}')
+async def api_album_cover(album_id: int):
+    try:
+        cur = db_conn.cursor()
+        cur.execute('SELECT art FROM albums WHERE id = ?', (album_id,))
+        r = cur.fetchone()
+        if r and r[0]:
+            data = r[0]
+            # guess type
+            if data[:8].startswith(b'\x89PNG'):
+                ctype = 'image/png'
+            else:
+                ctype = 'image/jpeg'
+            return Response(content=data, media_type=ctype)
+        # fallback: try first song cover
+        album = get_album(db_conn, album_id)
+        if album and album.get('songs'):
+            sid = album['songs'][0]['id']
+            return await api_cover(sid)
+        return Response(status_code=204)
+    except Exception as e:
+        logger.exception('api_album_cover error: %s', e)
+        return Response(status_code=500)
+
+
 @app.get('/api/links')
 async def api_links():
     try:
@@ -344,6 +411,17 @@ async def api_admin_logs():
         return {'lines': lines}
     except Exception as e:
         logger.exception('api_admin_logs error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/api/admin/jobs')
+async def api_admin_jobs():
+    try:
+        # Return a list of active job ids
+        jobs = list(server.job_queues.keys())
+        return {'jobs': jobs}
+    except Exception as e:
+        logger.exception('api_admin_jobs error: %s', e)
         return {'error': str(e)}
 
 
@@ -405,15 +483,20 @@ async def download_album(album_id: int):
         album = get_album(db_conn, album_id)
         if not album:
             return {'status': 'not_found'}
-        # create a zip in OUTPUT_ROOT
-        zip_name = f'album_{album_id}.zip'
+        # create a zip in OUTPUT_ROOT named after the album
+        safe_name = sanitize_filename(album.get('name') or f'album_{album_id}')
+        zip_name = f"{safe_name}.zip"
         zip_path = OUTPUT_ROOT / zip_name
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            added = 0
             for s in album.get('songs', []):
                 fp = Path(s['filepath'])
                 if fp.exists():
                     arcname = fp.name
                     zf.write(fp, arcname=arcname)
+                    added += 1
+        if added == 0:
+            return {'status': 'empty'}
         return FileResponse(str(zip_path), filename=zip_name, media_type='application/zip')
     except Exception as e:
         logger.exception('download_album error: %s', e)

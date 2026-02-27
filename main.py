@@ -183,6 +183,13 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
                 af.write(f"{album_name}\t{url}\n")
         except Exception as e:
             logger.warning("Failed to write to archive file %s: %s", archive_file, e)
+        # Also attempt to write to the repository-level archive for indexing by the web UI
+        try:
+            repo_archive = os.path.join(output_dir, 'archive.txt')
+            with open(repo_archive, 'a', encoding='utf-8') as raf:
+                raf.write(f"{album_name}\t{url}\n")
+        except Exception:
+            pass
 
         # Remove any thumbnails created during this download (webp/jpg/png)
         try:

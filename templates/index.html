@@ -42,7 +42,7 @@
 
     <div class="card links-card-wrap">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div><strong>M4A Converter</strong><div class="small">YouTube Albums:</div></div>
+          <div><strong>YouTube Albums:</strong><div class="small">Paste albums into the text box below to convert to M4A files</div></div>
         </div>
 
         <div class="links-area">
@@ -80,11 +80,25 @@
       <div class="tabs" style="margin-top:10px">
         <div class="tab active" data-tab="albums">Albums</div>
         <div class="tab" data-tab="songs">Songs</div>
+        <div class="tab" data-tab="admin">Admin</div>
       </div>
 
       <div id="gridArea">
         <div id="albumsView" class="list"></div>
         <div id="songsView" class="list" style="display:none"></div>
+        <div id="adminView" style="display:none;padding:12px;background:transparent;border-radius:8px;color:inherit">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="flex:1">
+              <h3 style="margin-top:0">Server Logs</h3>
+              <div id="adminLogs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:240px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
+            </div>
+            <div style="width:320px">
+              <h3 style="margin-top:0">Active Jobs</h3>
+              <div id="adminJobs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:240px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
+            </div>
+          </div>
+          <div style="margin-top:8px"><small class="small">Click a job id to open a live log stream (admin view uses job WebSocket endpoints).</small></div>
+        </div>
       </div>
     </div>
   </div>
@@ -134,7 +148,7 @@ convertBtn.addEventListener('click', async ()=>{
   jobRunning = true;
   status.textContent = '';
   downloadLink.innerHTML='';
-  const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws/' + jid);
+  const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
   ws.onmessage = (ev)=>{
     const txt = ev.data;
     if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
@@ -152,7 +166,7 @@ convertBtn.addEventListener('click', async ()=>{
 
 // Tabs + refresh
 const tabs = document.querySelectorAll('.tab');
-tabs.forEach(t=> t.addEventListener('click', ()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; }));
+tabs.forEach(t=> t.addEventListener('click', (ev)=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; document.getElementById('adminView').style.display = tab==='admin'?'block':'none'; if(tab==='admin'){ fetchAdmin(); } }));
 
 async function fetchAlbums(){
   const el = document.getElementById('albumsView'); el.innerHTML='Loading...';
@@ -166,17 +180,8 @@ async function fetchAlbums(){
     const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/album/${a.id}" class="small">Download</a>`;
     item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
     el.appendChild(item);
-    // try to fetch cover art by asking for the first song in album details
-    (async ()=>{
-      try{
-        const detal = await (await fetch('/api/albums/' + a.id)).json();
-        if(detal.songs && detal.songs.length){
-          const sid = detal.songs[0].id;
-          const c = await fetch('/api/cover/' + sid);
-          if(c.status===200){ cover.src = '/api/cover/' + sid; }
-        }
-      }catch(e){}
-    })();
+    // set album cover from album-cover endpoint
+    cover.src = '/api/album-cover/' + a.id;
   }
 }
 
@@ -192,11 +197,55 @@ async function fetchSongs(){
   }
 }
 
+async function fetchAdmin(){
+  const logsEl = document.getElementById('adminLogs');
+  const jobsEl = document.getElementById('adminJobs');
+  logsEl.textContent = 'Loading...'; jobsEl.textContent = 'Loading...';
+  try{
+    const r1 = await fetch('/api/admin/logs'); const j1 = await r1.json();
+    logsEl.textContent = (j1.lines || []).join('\n');
+  }catch(e){ logsEl.textContent = 'Failed to load logs'; }
+  try{
+    const r2 = await fetch('/api/admin/jobs'); const j2 = await r2.json();
+    jobsEl.innerHTML = '';
+    if(j2.jobs && j2.jobs.length){
+      j2.jobs.forEach(id=>{
+        const b = document.createElement('div'); b.textContent = id; b.style.cursor='pointer'; b.style.padding='6px'; b.style.borderBottom='1px dashed rgba(255,255,255,0.03)';
+        b.addEventListener('click', ()=>{ openJobStream(id); });
+        jobsEl.appendChild(b);
+      });
+    } else {
+      jobsEl.textContent = 'No active jobs';
+    }
+  }catch(e){ jobsEl.textContent = 'Failed to load jobs'; }
+}
+
+let adminJobWS = null;
+function openJobStream(jobId){
+  if(adminJobWS){ try{ adminJobWS.close(); }catch(e){} adminJobWS=null; }
+  const logsEl = document.getElementById('adminLogs');
+  logsEl.textContent = 'Connecting to job ' + jobId + '...\n';
+  adminJobWS = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jobId);
+  adminJobWS.onmessage = (ev)=>{ logsEl.textContent += ev.data + '\n'; logsEl.scrollTop = logsEl.scrollHeight; };
+  adminJobWS.onclose = ()=>{ logsEl.textContent += '\n[connection closed]\n'; };
+  adminJobWS.onerror = ()=>{ logsEl.textContent += '\n[error connecting]\n'; };
+}
+
 document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); });
 window.addEventListener('load', ()=>{ fetchAlbums(); fetchSongs(); });
 
-// Auto-refresh every 30s unless a job is running
-setInterval(()=>{ if(!jobRunning){ fetchAlbums(); fetchSongs(); } }, 30000);
+// Auto-refresh with limited repeats
+let autoRefreshCount = 0;
+const maxAutoRefresh = 5; // stop auto-refresh after this many times until manual/convert triggers
+const autoInterval = setInterval(()=>{
+  if(jobRunning) return;
+  if(autoRefreshCount >= maxAutoRefresh) return;
+  fetchAlbums(); fetchSongs(); autoRefreshCount++;
+}, 30000);
+function resetAutoRefresh(){ autoRefreshCount = 0; }
+// reset auto-refresh when user manually refreshes or runs convert
+document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); resetAutoRefresh(); });
+// reset after convert finishes (ws close handler already calls fetchAlbums/fetchSongs)
 </script>
 </body>
 </html>

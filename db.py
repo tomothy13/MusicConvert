@@ -16,6 +16,8 @@ def init_db(db_path: str | Path):
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
         directory TEXT,
+        artist TEXT,
+        art BLOB,
         created_at REAL NOT NULL
     )
     ''')
@@ -32,6 +34,15 @@ def init_db(db_path: str | Path):
         filesize INTEGER,
         created_at REAL NOT NULL,
         FOREIGN KEY(album_id) REFERENCES albums(id) ON DELETE CASCADE
+    )
+    ''')
+    # Links table to track user-supplied links and status
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS links (
+        id INTEGER PRIMARY KEY,
+        link TEXT NOT NULL UNIQUE,
+        status TEXT,
+        created_at REAL NOT NULL
     )
     ''')
     conn.commit()
@@ -52,6 +63,20 @@ def create_album(conn: sqlite3.Connection, name: str, directory: str | None = No
     return row[0] if row else None
 
 
+def update_album_art(conn: sqlite3.Connection, album_id: int, artist: str | None, art_bytes: bytes | None):
+    cur = conn.cursor()
+    try:
+        if artist is not None and art_bytes is not None:
+            cur.execute('UPDATE albums SET artist = ?, art = ? WHERE id = ?', (artist, art_bytes, album_id))
+        elif artist is not None:
+            cur.execute('UPDATE albums SET artist = ? WHERE id = ?', (artist, album_id))
+        elif art_bytes is not None:
+            cur.execute('UPDATE albums SET art = ? WHERE id = ?', (art_bytes, album_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 def add_song(conn: sqlite3.Connection, album_id: int, filename: str, filepath: str, metadata: dict | None = None):
     now = time.time()
     metadata = metadata or {}
@@ -70,6 +95,27 @@ def add_song(conn: sqlite3.Connection, album_id: int, filename: str, filepath: s
     )
     conn.commit()
     return cur.lastrowid
+
+
+def add_link(conn: sqlite3.Connection, link: str, status: str | None = None):
+    now = time.time()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT INTO links(link,status,created_at) VALUES(?,?,?)', (link, status, now))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        try:
+            cur.execute('UPDATE links SET status = ? WHERE link = ?', (status, link))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+
+def list_links(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    cur.execute('SELECT id,link,status,created_at FROM links ORDER BY created_at DESC')
+    rows = cur.fetchall()
+    return [dict(id=r[0], link=r[1], status=r[2], created_at=r[3]) for r in rows]
 
 
 def list_albums(conn: sqlite3.Connection):
