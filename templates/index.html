@@ -86,22 +86,33 @@
       </div>
 
       <div id="gridArea">
-      <div id="albumsView" class="list"></div>
-      <div id="songsView" class="list" style="display:none"></div>
-      <div id="adminView" style="display:none;padding:12px;background:transparent;border-radius:8px;color:inherit">
-          <div style="display:flex;gap:12px;align-items:flex-start">
-            <div style="flex:1">
-              <h3 style="margin-top:0">Server Logs</h3>
-              <div id="adminLogs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:240px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
-            </div>
-            <div style="width:320px">
-              <h3 style="margin-top:0">Active Jobs</h3>
-              <div id="adminJobs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:240px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
-            </div>
-          </div>
-          <div style="margin-top:8px"><small class="small">Click a job id to open a live log stream (admin view uses job WebSocket endpoints).</small></div>
+        <div id="albumsView" class="list"></div>
+        <div id="songsView" class="list" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Admin card separated to avoid auto-refresh scrolling issues -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="display:flex;flex-direction:column">
+          <strong>Admin</strong>
+          <div class="small">Server logs and active jobs (manual refresh only)</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="adminRefresh" class="ghost">Refresh</button>
         </div>
       </div>
+      <div style="margin-top:10px;display:flex;gap:12px;align-items:flex-start">
+        <div style="flex:1">
+          <h3 style="margin-top:0">Server Logs</h3>
+          <div id="adminLogs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:360px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
+        </div>
+        <div style="width:320px">
+          <h3 style="margin-top:0">Active Jobs</h3>
+          <div id="adminJobs" style="background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:360px;overflow:auto;color:inherit;font-family:monospace;font-size:13px"></div>
+        </div>
+      </div>
+      <div style="margin-top:8px"><small class="small">Click a job id to open a live log stream.</small></div>
     </div>
   </div>
 
@@ -150,7 +161,6 @@ convertBtn.addEventListener('click', async ()=>{
   jobRunning = true;
   status.textContent = '';
   downloadLink.innerHTML='';
-  const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
   let wsRetries = 0;
   function connectWS(){
     const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
@@ -161,8 +171,9 @@ convertBtn.addEventListener('click', async ()=>{
       if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
       else if(txt.startsWith('ZIP_READY:')){
         const name = txt.split(':',2)[1];
-        downloadLink.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
-      } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; ws.close(); }
+        // Create a proper download action (handled below) and show link
+        downloadLink.innerHTML = `<a href="/download/${jid}" data-dl="album" data-id="${jid}" class="dl small">Download ${name}</a>`;
+      } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; try{ ws.close(); }catch(e){} }
       else {
         // prettify common yt-dlp messages
         if(txt.startsWith('downloading:')){
@@ -185,15 +196,23 @@ convertBtn.addEventListener('click', async ()=>{
     ws.onclose = ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); };
   }
   connectWS();
-  ws.addEventListener('close', ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); });
 });
 
 // status is shown below the convert controls and updates with job progress
 
 // Tabs + refresh
 const tabs = document.querySelectorAll('.tab');
-let adminPoll = null;
-tabs.forEach(t=> t.addEventListener('click', (ev)=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; document.getElementById('adminView').style.display = tab==='admin'?'block':'none'; if(tab==='admin'){ fetchAdmin(); if(adminPoll) clearInterval(adminPoll); adminPoll = setInterval(fetchAdmin, 3000); } else { if(adminPoll) { clearInterval(adminPoll); adminPoll = null; } } }));
+tabs.forEach(t=> t.addEventListener('click', (ev)=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  const tab = t.getAttribute('data-tab');
+  document.getElementById('albumsView').style.display = tab==='albums' ? 'grid' : 'none';
+  document.getElementById('songsView').style.display = tab==='songs' ? 'grid' : 'none';
+  // admin tab now shows the separate admin card below; only fetch on activation (no auto-refresh)
+  if(tab === 'admin'){
+    fetchAdmin();
+  }
+}));
 
 async function fetchAlbums(){
   const el = document.getElementById('albumsView'); el.innerHTML='Loading...';
@@ -204,7 +223,7 @@ async function fetchAlbums(){
     let cover = document.createElement('img'); cover.className='cover'; cover.src='';
     if(a.songs && a.songs.length){ /* nothing */ }
     const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${a.name}</h4><p class="small">Album</p>`;
-    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/album/${a.id}" class="small">Download</a>`;
+    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/album/${a.id}" data-dl="album" data-id="${a.id}" class="dl small">Download</a>`;
     item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
     el.appendChild(item);
     // set album cover from album-cover endpoint
@@ -218,7 +237,7 @@ async function fetchSongs(){
     const item = document.createElement('div'); item.className='item';
     const cover = document.createElement('img'); cover.className='cover'; cover.src = '/api/cover/' + s.id;
     const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${s.title || s.filename}</h4><p class="small">${s.artist || ''} — ${s.album_name || ''}</p>`;
-    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/song/${s.id}" class="small">Download</a>`;
+    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/song/${s.id}" data-dl="song" data-id="${s.id}" class="dl small">Download</a>`;
     item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
     el.appendChild(item);
   }
@@ -261,18 +280,45 @@ function openJobStream(jobId){
 document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); });
 window.addEventListener('load', ()=>{ fetchAlbums(); fetchSongs(); });
 
+// Admin manual refresh
+document.getElementById('adminRefresh').addEventListener('click', ()=>{ fetchAdmin(); });
+
+// Download handler: fetch the endpoint and force download when a zip/file is returned.
+document.addEventListener('click', async (ev)=>{
+  const a = ev.target.closest && ev.target.closest('a.dl');
+  if(!a) return;
+  ev.preventDefault();
+  const href = a.getAttribute('href');
+  try{
+    const r = await fetch(href);
+    const ct = r.headers.get('content-type') || '';
+    if(ct.includes('application/zip') || ct.includes('audio/') || ct.includes('application/octet-stream')){
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      // try to infer filename from Content-Disposition or fallback to path
+      const disp = r.headers.get('content-disposition') || '';
+      let fname = a.textContent.trim() || 'download';
+      const m = /filename=\"?([^\";]+)\"?/.exec(disp);
+      if(m) fname = m[1];
+      link.download = fname;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } else {
+      // likely JSON with error/status - show message
+      const j = await r.json().catch(()=>null);
+      if(j && j.status) alert('Download unavailable: ' + j.status);
+      else alert('Download failed or returned unexpected content');
+    }
+  }catch(e){ alert('Download failed: ' + e); }
+});
+
 // Auto-refresh with limited repeats
-let autoRefreshCount = 0;
-const maxAutoRefresh = 5; // stop auto-refresh after this many times until manual/convert triggers
-const autoInterval = setInterval(()=>{
-  if(jobRunning) return;
-  if(autoRefreshCount >= maxAutoRefresh) return;
-  fetchAlbums(); fetchSongs(); autoRefreshCount++;
-}, 30000);
-function resetAutoRefresh(){ autoRefreshCount = 0; }
-// reset auto-refresh when user manually refreshes or runs convert
-document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); resetAutoRefresh(); });
-// reset after convert finishes (ws close handler already calls fetchAlbums/fetchSongs)
+// Auto-refresh removed to avoid clobbering the admin log scroll position.
+// Manual refresh buttons are provided instead.
 </script>
 </body>
 </html>
