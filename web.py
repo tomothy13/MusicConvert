@@ -82,12 +82,23 @@ class MusicConvertServer:
         try:
             while True:
                 msg = await q.get()
-                await websocket.send_text(msg)
+                try:
+                    await websocket.send_text(msg)
+                except Exception:
+                    # Client disconnected; stop sending further messages
+                    logger.info('WebSocket client disconnected for job %s', job_id)
+                    break
                 if msg == '__DONE__':
                     zip_path = self.job_zip_paths.get(job_id)
                     if zip_path:
-                        await websocket.send_text(f'ZIP_READY:{zip_path.name}')
-                    await websocket.close()
+                        try:
+                            await websocket.send_text(f'ZIP_READY:{zip_path.name}')
+                        except Exception:
+                            logger.info('WebSocket client disconnected before ZIP_READY for job %s', job_id)
+                    try:
+                        await websocket.close()
+                    except Exception:
+                        pass
                     break
         except Exception as e:
             logger.exception('Exception in ws_handler for job %s: %s', job_id, e)
@@ -210,23 +221,6 @@ class MusicConvertServer:
                 except Exception:
                     pass
 
-        # create zip archive
-        zip_name = f'music_{job_id}.zip'
-        zip_path = OUTPUT_ROOT / zip_name
-        await q.put('Creating ZIP archive...')
-        try:
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(job_dir):
-                    for f in files:
-                        full = Path(root) / f
-                        rel = full.relative_to(job_dir)
-                        zf.write(full, arcname=rel)
-            self.job_zip_paths[job_id] = zip_path
-            await q.put('ZIP_CREATED')
-        except Exception as e:
-            logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
-            await q.put(f'Failed to create ZIP: {e}')
-
         # Populate DB with albums/songs found in job_dir
         try:
             await q.put('Indexing files into database...')
@@ -251,7 +245,6 @@ class MusicConvertServer:
                                 try:
                                     album_art = bytes(covr[0])
                                 except Exception:
-                                    # fallback if covr item is already bytes-like
                                     try:
                                         album_art = covr[0]
                                     except Exception:
@@ -279,6 +272,31 @@ class MusicConvertServer:
         except Exception as e:
             logger.exception('Failed to index job %s into database: %s', job_id, e)
             await q.put(f'Indexing error: {e}')
+
+        # create zip archive AFTER indexing so files are present and DB reflects them
+        zip_name = f'music_{job_id}.zip'
+        zip_path = OUTPUT_ROOT / zip_name
+        await q.put('Creating ZIP archive...')
+        try:
+            added_count = 0
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(job_dir):
+                    for f in files:
+                        full = Path(root) / f
+                        rel = full.relative_to(job_dir)
+                        try:
+                            zf.write(full, arcname=rel)
+                            added_count += 1
+                        except Exception:
+                            logger.exception('Failed to add file %s to zip for job %s', full, job_id)
+            if added_count > 0:
+                self.job_zip_paths[job_id] = zip_path
+                await q.put('ZIP_CREATED')
+            else:
+                await q.put('ZIP_CREATED:empty')
+        except Exception as e:
+            logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
+            await q.put(f'Failed to create ZIP: {e}')
 
         await q.put('__DONE__')
         # remove this job from active queues so admin list clears
@@ -332,8 +350,13 @@ async def api_cover(song_id: int):
             covr = mp4.tags.get('covr')
             if covr and len(covr) > 0:
                 data = covr[0]
+                # ensure bytes
+                try:
+                    data = bytes(data)
+                except Exception:
+                    pass
                 # try to guess image type via first bytes
-                if data[:8].startswith(b'\x89PNG'):
+                if isinstance(data, (bytes, bytearray)) and data[:8].startswith(b'\x89PNG'):
                     ctype = 'image/png'
                 elif data[:3] == b'GIF':
                     ctype = 'image/gif'
@@ -357,8 +380,12 @@ async def api_album_cover(album_id: int):
         r = cur.fetchone()
         if r and r[0]:
             data = r[0]
+            try:
+                data = bytes(data)
+            except Exception:
+                pass
             # guess type
-            if data[:8].startswith(b'\x89PNG'):
+            if isinstance(data, (bytes, bytearray)) and data[:8].startswith(b'\x89PNG'):
                 ctype = 'image/png'
             else:
                 ctype = 'image/jpeg'
@@ -499,14 +526,24 @@ async def download_album(album_id: int):
         safe_name = sanitize_filename(album.get('name') or f'album_{album_id}')
         zip_name = f"{safe_name}.zip"
         zip_path = OUTPUT_ROOT / zip_name
+        added = 0
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            added = 0
             for s in album.get('songs', []):
-                fp = Path(s['filepath'])
-                if fp.exists():
+                fp = Path(s.get('filepath') or '')
+                if not fp.exists():
+                    # try album directory fallback
+                    adir = album.get('directory')
+                    if adir:
+                        alt = Path(adir) / s.get('filename')
+                        if alt.exists():
+                            fp = alt
+                if fp and fp.exists():
                     arcname = fp.name
-                    zf.write(fp, arcname=arcname)
-                    added += 1
+                    try:
+                        zf.write(fp, arcname=arcname)
+                        added += 1
+                    except Exception:
+                        logger.exception('Failed to add %s to album zip %s', fp, zip_path)
         if added == 0:
             return {'status': 'empty'}
         return FileResponse(str(zip_path), filename=zip_name, media_type='application/zip')
