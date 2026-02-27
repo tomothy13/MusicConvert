@@ -25,6 +25,8 @@
     .tab{padding:8px 12px;border-radius:8px;background:transparent;cursor:pointer}
     .tab.active{background:rgba(255,255,255,0.04);color:var(--accent)}
     .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
+    /* Albums should be displayed as a vertical list */
+    #albumsView.list{display:flex;flex-direction:column;gap:12px;margin-top:12px}
     .item{display:flex;gap:8px;align-items:center;background:var(--card);padding:8px;border-radius:8px;color:inherit}
     .cover{width:56px;height:56px;background:rgba(255,255,255,0.02);border-radius:6px;flex:0 0 56px;object-fit:cover}
     .meta{flex:1}
@@ -84,9 +86,9 @@
       </div>
 
       <div id="gridArea">
-        <div id="albumsView" class="list"></div>
-        <div id="songsView" class="list" style="display:none"></div>
-        <div id="adminView" style="display:none;padding:12px;background:transparent;border-radius:8px;color:inherit">
+      <div id="albumsView" class="list"></div>
+      <div id="songsView" class="list" style="display:none"></div>
+      <div id="adminView" style="display:none;padding:12px;background:transparent;border-radius:8px;color:inherit">
           <div style="display:flex;gap:12px;align-items:flex-start">
             <div style="flex:1">
               <h3 style="margin-top:0">Server Logs</h3>
@@ -149,16 +151,40 @@ convertBtn.addEventListener('click', async ()=>{
   status.textContent = '';
   downloadLink.innerHTML='';
   const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
-  ws.onmessage = (ev)=>{
-    const txt = ev.data;
-    if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
-    else if(txt.startsWith('ZIP_READY:')){
-      const name = txt.split(':',2)[1];
-      downloadLink.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
-    } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; ws.close(); }
-    else { status.textContent += txt + '\n'; status.scrollTop = status.scrollHeight; }
-  };
-  ws.onerror = ()=> { status.textContent += 'WebSocket error\n'; };
+  let wsRetries = 0;
+  function connectWS(){
+    const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
+    ws.onopen = ()=>{ wsRetries = 0; };
+    ws.onmessage = (ev)=>{
+      const txt = ev.data;
+      // simplify messages for the status box
+      if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
+      else if(txt.startsWith('ZIP_READY:')){
+        const name = txt.split(':',2)[1];
+        downloadLink.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
+      } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; ws.close(); }
+      else {
+        // prettify common yt-dlp messages
+        if(txt.startsWith('downloading:')){
+          const parts = txt.split(':');
+          const pct = parts[1] || '';
+          status.textContent += `Downloading ${pct}%\n`;
+        } else if(txt.startsWith('finished:')){
+          const fn = txt.split(':',2)[1] || '';
+          status.textContent += `Finished: ${fn}\n`;
+        } else {
+          status.textContent += txt + '\n';
+        }
+        status.scrollTop = status.scrollHeight;
+      }
+    };
+    ws.onerror = ()=>{
+      if(wsRetries < 3){ wsRetries++; setTimeout(connectWS, 500); }
+      else { status.textContent += 'WebSocket error\n'; }
+    };
+    ws.onclose = ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); };
+  }
+  connectWS();
   ws.addEventListener('close', ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); });
 });
 
@@ -166,7 +192,8 @@ convertBtn.addEventListener('click', async ()=>{
 
 // Tabs + refresh
 const tabs = document.querySelectorAll('.tab');
-tabs.forEach(t=> t.addEventListener('click', (ev)=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; document.getElementById('adminView').style.display = tab==='admin'?'block':'none'; if(tab==='admin'){ fetchAdmin(); } }));
+let adminPoll = null;
+tabs.forEach(t=> t.addEventListener('click', (ev)=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; document.getElementById('adminView').style.display = tab==='admin'?'block':'none'; if(tab==='admin'){ fetchAdmin(); if(adminPoll) clearInterval(adminPoll); adminPoll = setInterval(fetchAdmin, 3000); } else { if(adminPoll) { clearInterval(adminPoll); adminPoll = null; } } }));
 
 async function fetchAlbums(){
   const el = document.getElementById('albumsView'); el.innerHTML='Loading...';
@@ -209,11 +236,11 @@ async function fetchAdmin(){
     const r2 = await fetch('/api/admin/jobs'); const j2 = await r2.json();
     jobsEl.innerHTML = '';
     if(j2.jobs && j2.jobs.length){
-      j2.jobs.forEach(id=>{
-        const b = document.createElement('div'); b.textContent = id; b.style.cursor='pointer'; b.style.padding='6px'; b.style.borderBottom='1px dashed rgba(255,255,255,0.03)';
-        b.addEventListener('click', ()=>{ openJobStream(id); });
-        jobsEl.appendChild(b);
-      });
+        j2.jobs.forEach(id=>{
+          const btn = document.createElement('button'); btn.textContent = id; btn.style.width='100%'; btn.style.marginBottom='6px'; btn.style.padding='8px'; btn.className='ghost';
+          btn.addEventListener('click', ()=>{ openJobStream(id); });
+          jobsEl.appendChild(btn);
+        });
     } else {
       jobsEl.textContent = 'No active jobs';
     }

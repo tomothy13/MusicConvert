@@ -143,7 +143,8 @@ def get_album(conn: sqlite3.Connection, album_id: int):
     if not row:
         return None
     album = dict(id=row[0], name=row[1], directory=row[2], created_at=row[3])
-    cur.execute('SELECT id,filename,filepath,title,artist,duration,track,filesize,created_at FROM songs WHERE album_id = ? ORDER BY track NULLS LAST, filename', (album_id,))
+    # SQLite doesn't support NULLS LAST syntax; order by whether track IS NULL first, then track, then filename
+    cur.execute('SELECT id,filename,filepath,title,artist,duration,track,filesize,created_at FROM songs WHERE album_id = ? ORDER BY (track IS NULL), track, filename', (album_id,))
     songs = []
     for r in cur.fetchall():
         songs.append(dict(id=r[0], filename=r[1], filepath=r[2], title=r[3], artist=r[4], duration=r[5], track=r[6], filesize=r[7], created_at=r[8]))

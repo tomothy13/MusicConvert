@@ -248,7 +248,14 @@ class MusicConvertServer:
                             m = MP4(str(f))
                             covr = m.tags.get('covr') if m.tags else None
                             if covr and len(covr) > 0 and album_art is None:
-                                album_art = covr[0]
+                                try:
+                                    album_art = bytes(covr[0])
+                                except Exception:
+                                    # fallback if covr item is already bytes-like
+                                    try:
+                                        album_art = covr[0]
+                                    except Exception:
+                                        album_art = None
                         except Exception:
                             pass
                         if not album_artist and meta.get('artist'):
@@ -274,6 +281,11 @@ class MusicConvertServer:
             await q.put(f'Indexing error: {e}')
 
         await q.put('__DONE__')
+        # remove this job from active queues so admin list clears
+        try:
+            self.job_queues.pop(job_id, None)
+        except Exception:
+            pass
 
 
 # ----------------------
