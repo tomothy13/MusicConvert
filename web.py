@@ -289,11 +289,15 @@ class MusicConvertServer:
                             added_count += 1
                         except Exception:
                             logger.exception('Failed to add file %s to zip for job %s', full, job_id)
+            # Always notify client a ZIP creation attempt completed; then provide READY state
+            await q.put('ZIP_CREATED')
             if added_count > 0:
                 self.job_zip_paths[job_id] = zip_path
-                await q.put('ZIP_CREATED')
+                # notify immediately that the ZIP is ready for download
+                await q.put(f'ZIP_READY:{zip_path.name}')
             else:
-                await q.put('ZIP_CREATED:empty')
+                # signal empty so client shows helpful message
+                await q.put('ZIP_READY:empty')
         except Exception as e:
             logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
             await q.put(f'Failed to create ZIP: {e}')

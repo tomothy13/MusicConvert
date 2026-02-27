@@ -170,8 +170,12 @@ convertBtn.addEventListener('click', async ()=>{
       if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
       else if(txt.startsWith('ZIP_READY:')){
         const name = txt.split(':',2)[1];
-        // Create a proper download action (handled below) and show link
-        downloadLink.innerHTML = `<a href="/download/${jid}" data-dl="album" data-id="${jid}" class="dl small">Download ${name}</a>`;
+        if(name === 'empty'){
+          status.textContent += 'ZIP created but contains no files\n';
+        } else {
+          // Create a proper download action (handled below) and show link
+          downloadLink.innerHTML = `<a href="/download/${jid}" data-dl="album" data-id="${jid}" class="dl small">Download ${name}</a>`;
+        }
       } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; try{ ws.close(); }catch(e){} }
       else {
         // prettify common yt-dlp messages
