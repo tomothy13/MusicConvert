@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MusicConvert — Local UI</title>
+  <title>M4A Converter</title>
   <style>
     :root{--bg:#0b1220;--card:#0f1724;--muted:#9ca3af;--accent:#60a5fa;--accent-2:#7c3aed}
     *{box-sizing:border-box}
@@ -23,25 +23,26 @@
     .links-card-wrap{position:relative}
     .tabs{display:flex;gap:8px;margin-top:10px}
     .tab{padding:8px 12px;border-radius:8px;background:transparent;cursor:pointer}
-    .tab.active{background:#eef2ff;color:var(--accent)}
+    .tab.active{background:rgba(255,255,255,0.04);color:var(--accent)}
     .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
-    .item{display:flex;gap:8px;align-items:center;background:#fff;padding:8px;border-radius:8px}
-    .cover{width:56px;height:56px;background:#f3f4f6;border-radius:6px;flex:0 0 56px;object-fit:cover}
+    .item{display:flex;gap:8px;align-items:center;background:var(--card);padding:8px;border-radius:8px;color:inherit}
+    .cover{width:56px;height:56px;background:rgba(255,255,255,0.02);border-radius:6px;flex:0 0 56px;object-fit:cover}
     .meta{flex:1}
     .meta h4{margin:0;font-size:14px}
     .meta p{margin:2px 0 0;color:var(--muted);font-size:13px}
     .small{font-size:12px;color:var(--muted)}
     .search-row{display:flex;gap:8px;align-items:center}
-    .search-row input, .search-row select{padding:8px;border-radius:8px;border:1px solid #e5e7eb}
+    .search-row input, .search-row select{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    a.small{color:var(--accent);text-decoration:none}
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>MusicConvert — Local UI</h1>
+    <h1>M4A Converter</h1>
 
     <div class="card links-card-wrap">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div><strong>M4A Converter</strong><div class="small">Add many links and click Convert</div></div>
+          <div><strong>M4A Converter</strong><div class="small">YouTube Albums:</div></div>
         </div>
 
         <div class="links-area">
@@ -91,7 +92,6 @@
 <script>
 // Link box management
 const linksList = document.getElementById('linksList');
-document.getElementById('addLink').addEventListener('click', addLinkBox);
 document.getElementById('addLinkInline').addEventListener('click', addLinkBox);
 document.getElementById('removeLink').addEventListener('click', ()=>{ const boxes = document.querySelectorAll('.link-box'); if(boxes.length>1) boxes[boxes.length-1].remove(); });
 document.getElementById('clearBtn').addEventListener('click', ()=>{
@@ -117,6 +117,10 @@ const status = document.getElementById('status');
 const statusArea = document.getElementById('statusArea');
 const downloadLink = document.getElementById('downloadLink');
 let jobRunning = false;
+// Always show status box below controls
+status.style.display = 'block';
+status.textContent = 'Idle.';
+
 convertBtn.addEventListener('click', async ()=>{
   const vals = Array.from(document.querySelectorAll('.link-box')).map(i=>i.value.trim()).filter(Boolean);
   if(!vals.length) return alert('Add at least one link');
@@ -128,40 +132,23 @@ convertBtn.addEventListener('click', async ()=>{
   if(!json.job_id) return alert('Failed to start job');
   const jid = json.job_id;
   jobRunning = true;
-  // show status box
-  status.style.display='block'; status.textContent = '';
+  status.textContent = '';
   downloadLink.innerHTML='';
   const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws/' + jid);
   ws.onmessage = (ev)=>{
     const txt = ev.data;
-    if(txt === 'ZIP_CREATED') append('ZIP created');
+    if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
     else if(txt.startsWith('ZIP_READY:')){
       const name = txt.split(':',2)[1];
       downloadLink.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
-    } else if(txt === '__DONE__'){ append('Job complete'); ws.close(); }
-    else append(txt);
+    } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; ws.close(); }
+    else { status.textContent += txt + '\n'; status.scrollTop = status.scrollHeight; }
   };
-  ws.onerror = ()=> append('WebSocket error');
-  function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; }
+  ws.onerror = ()=> { status.textContent += 'WebSocket error\n'; };
   ws.addEventListener('close', ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); });
 });
 
-// Overlay handling: show overlay covering links area while jobRunning
-function showOverlay(){ const wrap=document.querySelector('.links-card-wrap'); if(!wrap) return; let ov=wrap.querySelector('.overlay'); if(!ov){ ov=document.createElement('div'); ov.className='overlay'; ov.innerHTML = '<div style="flex:1;overflow:auto" id="overlayStatus"></div><div style="display:flex;gap:8px"><button id="dismissOverlay" class="ghost">Dismiss</button></div>'; wrap.appendChild(ov); document.getElementById('dismissOverlay').addEventListener('click', ()=>{ ov.remove(); }); } overlayStatus = document.getElementById('overlayStatus'); overlayStatus.textContent=''; overlayStatus.style.whiteSpace='pre-wrap'; overlayStatus.style.color='inherit'; overlayStatus.style.fontFamily='inherit'; overlayStatus.style.fontSize='13px'; overlayStatus.style.overflow='auto'; overlayStatus.style.flex='1'; wrap.querySelector('.links-area').style.visibility='hidden'; }
-function hideOverlay(){ const wrap=document.querySelector('.links-card-wrap'); if(!wrap) return; const ov=wrap.querySelector('.overlay'); if(ov) ov.remove(); wrap.querySelector('.links-area').style.visibility='visible'; }
-
-// When a job starts, show overlay; update overlay text from status messages
-let overlayStatus=null;
-const origAppend = function(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; };
-
-function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; if(overlayStatus!==null) overlayStatus.textContent += m + '\n'; }
-
-// override the WebSocket flow to show overlay on start and show dismiss when done
-const origConvertHandler = convertBtn.onclick;
-// wrap existing click handler by listening for jobRunning toggles
-const observerInterval = setInterval(()=>{
-  if(jobRunning){ if(!document.querySelector('.links-card-wrap').querySelector('.overlay')) showOverlay(); }
-}, 200);
+// status is shown below the convert controls and updates with job progress
 
 // Tabs + refresh
 const tabs = document.querySelectorAll('.tab');

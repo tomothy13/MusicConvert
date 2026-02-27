@@ -17,6 +17,7 @@ from db import init_db, create_album, add_song, list_albums, get_album, get_song
 from db import list_songs
 from mutagen.mp4 import MP4
 import sqlite3
+import yt_dlp
 
 # ----------------------
 # Configuration & Setup
@@ -111,9 +112,55 @@ class MusicConvertServer:
 
         await q.put(f'Job {job_id} started, {len(links)} link(s)')
 
+        conn = db_conn
         for idx, link in enumerate(links, start=1):
             await q.put(f'[{idx}/{len(links)}] Starting: {link}')
             try:
+                # Probe the link to obtain playlist/title information for duplication checks
+                try:
+                    with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as probe_ydl:
+                        info = probe_ydl.extract_info(link, download=False)
+                except Exception:
+                    info = {}
+
+                probe_title = (info.get('title') or info.get('playlist_title') or '').strip()
+
+                # Check DB for existing album with same name (case-insensitive)
+                if probe_title:
+                    try:
+                        cur = conn.cursor()
+                        cur.execute('SELECT id FROM albums WHERE lower(name) = ?', (probe_title.lower(),))
+                        if cur.fetchone():
+                            await q.put(f'[{idx}/{len(links)}] Skipping: album "{probe_title}" already exists in database')
+                            continue
+                    except Exception:
+                        pass
+
+                # Check archive files for exact URL match to avoid duplicates
+                already_seen = False
+                try:
+                    for jobdir in OUTPUT_ROOT.iterdir():
+                        if not jobdir.is_dir():
+                            continue
+                        af = jobdir / 'archive.txt'
+                        if af.exists():
+                            try:
+                                with open(af, 'r', encoding='utf-8') as f:
+                                    for ln in f:
+                                        if ln.strip().endswith('\t' + link) or ('\t' + link) in ln:
+                                            already_seen = True
+                                            break
+                            except Exception:
+                                continue
+                        if already_seen:
+                            break
+                except Exception:
+                    already_seen = False
+
+                if already_seen:
+                    await q.put(f'[{idx}/{len(links)}] Skipping: link already processed previously')
+                    continue
+
                 # Create a thread-safe queue for progress messages from the downloader
                 thread_q: queue.Queue = queue.Queue()
 
