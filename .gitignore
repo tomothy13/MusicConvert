@@ -1,4 +1,12 @@
-.venv/
+# Ignore job outputs and music library
+/web_output/
+/venv/
+/MusicLibrary/
+*.pyc
+__pycache__/
+error.log
+*.zip
+.DS_Store.venv/
 venv/
 build/
 dist/

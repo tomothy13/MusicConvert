@@ -97,7 +97,6 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
             # determine target directory to search for new m4a files
             target_dir = album_dir if is_playlist else output_dir
             # find m4a files created/modified during this run
-            import glob, os
             cand = []
             for p in glob.glob(os.path.join(target_dir, '*.m4a')):
                 try:

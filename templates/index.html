@@ -5,18 +5,22 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>MusicConvert — Local UI</title>
   <style>
-    :root{--bg:#f6f7fb;--card:#fff;--muted:#6b7280;--accent:#2563eb}
-    body{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background:var(--bg); color:#111; margin:18px}
+    :root{--bg:#0b1220;--card:#0f1724;--muted:#9ca3af;--accent:#60a5fa;--accent-2:#7c3aed}
+    *{box-sizing:border-box}
+    body{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background:var(--bg); color:#e6eef8; margin:18px}
     .container{max-width:980px;margin:0 auto}
     h1{font-size:20px;margin:0 0 8px}
     .card{background:var(--card);padding:16px;border-radius:10px;box-shadow:0 1px 2px rgba(16,24,40,0.04);margin-bottom:12px}
     .links-area{display:flex;flex-direction:column;gap:8px}
     .links-list{display:flex;flex-direction:column;gap:8px}
-    .link-input{width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:8px}
+    .link-input{width:100%;padding:10px;border:1px solid #1f2937;border-radius:8px;background:transparent;color:inherit}
     .controls{display:flex;gap:8px}
-    button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
-    button.ghost{background:transparent;color:var(--accent);border:1px solid #dbeafe}
-    #status{white-space:pre-wrap;background:#0f172a;color:#e6eef8;padding:12px;border-radius:8px;height:220px;overflow:auto}
+    button{background:var(--accent);color:#0b1220;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;color:var(--accent);border:1px solid rgba(255,255,255,0.04)}
+    #status{white-space:pre-wrap;background:rgba(15,23,36,0.98);color:#e6eef8;padding:12px;border-radius:8px;height:220px;overflow:auto}
+    /* overlay covering links area while job running */
+    .overlay{position:absolute;inset:0;background:rgba(2,6,23,0.75);display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:10px}
+    .links-card-wrap{position:relative}
     .tabs{display:flex;gap:8px;margin-top:10px}
     .tab{padding:8px 12px;border-radius:8px;background:transparent;cursor:pointer}
     .tab.active{background:#eef2ff;color:var(--accent)}
@@ -35,14 +39,10 @@
   <div class="container">
     <h1>MusicConvert — Local UI</h1>
 
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <div><strong>Add YouTube links</strong><div class="small">Add many links and click Convert</div></div>
-        <div class="controls">
-          <button id="addLink">Add</button>
-          <button id="removeLink" class="ghost">Remove</button>
+    <div class="card links-card-wrap">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div><strong>M4A Converter</strong><div class="small">Add many links and click Convert</div></div>
         </div>
-      </div>
 
         <div class="links-area">
           <div class="links-list" id="linksList">
@@ -52,6 +52,7 @@
             <button id="convertBtn">Convert</button>
             <button id="clearBtn" class="ghost">Clear</button>
             <button id="addLinkInline" class="ghost">Add link</button>
+            <button id="removeLink" class="ghost">Remove</button>
           </div>
         </div>
       <div id="statusArea" style="margin-top:12px">
@@ -144,6 +145,23 @@ convertBtn.addEventListener('click', async ()=>{
   function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; }
   ws.addEventListener('close', ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); });
 });
+
+// Overlay handling: show overlay covering links area while jobRunning
+function showOverlay(){ const wrap=document.querySelector('.links-card-wrap'); if(!wrap) return; let ov=wrap.querySelector('.overlay'); if(!ov){ ov=document.createElement('div'); ov.className='overlay'; ov.innerHTML = '<div style="flex:1;overflow:auto" id="overlayStatus"></div><div style="display:flex;gap:8px"><button id="dismissOverlay" class="ghost">Dismiss</button></div>'; wrap.appendChild(ov); document.getElementById('dismissOverlay').addEventListener('click', ()=>{ ov.remove(); }); } overlayStatus = document.getElementById('overlayStatus'); overlayStatus.textContent=''; overlayStatus.style.whiteSpace='pre-wrap'; overlayStatus.style.color='inherit'; overlayStatus.style.fontFamily='inherit'; overlayStatus.style.fontSize='13px'; overlayStatus.style.overflow='auto'; overlayStatus.style.flex='1'; wrap.querySelector('.links-area').style.visibility='hidden'; }
+function hideOverlay(){ const wrap=document.querySelector('.links-card-wrap'); if(!wrap) return; const ov=wrap.querySelector('.overlay'); if(ov) ov.remove(); wrap.querySelector('.links-area').style.visibility='visible'; }
+
+// When a job starts, show overlay; update overlay text from status messages
+let overlayStatus=null;
+const origAppend = function(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; };
+
+function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; if(overlayStatus!==null) overlayStatus.textContent += m + '\n'; }
+
+// override the WebSocket flow to show overlay on start and show dismiss when done
+const origConvertHandler = convertBtn.onclick;
+// wrap existing click handler by listening for jobRunning toggles
+const observerInterval = setInterval(()=>{
+  if(jobRunning){ if(!document.querySelector('.links-card-wrap').querySelector('.overlay')) showOverlay(); }
+}, 200);
 
 // Tabs + refresh
 const tabs = document.querySelectorAll('.tab');

@@ -303,15 +303,9 @@ async def api_admin_logs():
 @app.post('/api/admin/query')
 async def api_admin_query(request: Request):
     try:
-        # Simple, restricted SQL runner for admins. Requires ADMIN_PASSWORD env var to be set and provided.
-        ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
-        if not ADMIN_PASSWORD:
-            return {'error': 'admin_disabled'}
+        # Simple, restricted SQL runner for admins. No password required (SELECT-only).
         body = await request.json()
-        pwd = body.get('password')
         query = body.get('query')
-        if pwd != ADMIN_PASSWORD:
-            return {'error': 'unauthorized'}
         if not query or not isinstance(query, str):
             return {'error': 'invalid_query'}
         q = query.strip()
