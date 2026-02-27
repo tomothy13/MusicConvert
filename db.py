@@ -79,6 +79,17 @@ def list_albums(conn: sqlite3.Connection):
     return [dict(id=r[0], name=r[1], directory=r[2], created_at=r[3]) for r in rows]
 
 
+def list_songs(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    cur.execute('''
+    SELECT songs.id, songs.album_id, songs.filename, songs.filepath, songs.title, songs.artist, songs.duration, songs.track, songs.filesize, songs.created_at, albums.name
+    FROM songs LEFT JOIN albums ON songs.album_id = albums.id
+    ORDER BY songs.created_at DESC
+    ''')
+    rows = cur.fetchall()
+    return [dict(id=r[0], album_id=r[1], filename=r[2], filepath=r[3], title=r[4], artist=r[5], duration=r[6], track=r[7], filesize=r[8], created_at=r[9], album_name=r[10]) for r in rows]
+
+
 def get_album(conn: sqlite3.Connection, album_id: int):
     cur = conn.cursor()
     cur.execute('SELECT id,name,directory,created_at FROM albums WHERE id = ?', (album_id,))

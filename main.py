@@ -7,6 +7,7 @@ import glob
 import yt_dlp
 import queue
 from logging_setup import setup_logging
+from mutagen.mp4 import MP4, MP4Cover
 
 # initialize logging for CLI/downloader
 logger = setup_logging('musicconvert.main')
@@ -91,6 +92,87 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         logger.info("Download finished for URL: %s", url)
+        # After download, attempt to write MP4 tags so players like iTunes pick them up
+        try:
+            # determine target directory to search for new m4a files
+            target_dir = album_dir if is_playlist else output_dir
+            # find m4a files created/modified during this run
+            import glob, os
+            cand = []
+            for p in glob.glob(os.path.join(target_dir, '*.m4a')):
+                try:
+                    if os.path.getmtime(p) >= start_ts - 2:
+                        cand.append(p)
+                except Exception:
+                    pass
+
+            # helper: load a recent thumbnail if present
+            thumb_path = None
+            for ext in ('.webp', '.jpg', '.jpeg', '.png'):
+                for t in glob.glob(os.path.join(target_dir, f'*{ext}')):
+                    try:
+                        if os.path.getmtime(t) >= start_ts - 2:
+                            thumb_path = t
+                            break
+                    except Exception:
+                        pass
+                if thumb_path:
+                    break
+
+            album_name = playlist_title if is_playlist else (info.get('title') or 'single')
+            album_artist = info.get('uploader') or info.get('channel') or None
+
+            for fp in cand:
+                try:
+                    mp4 = MP4(fp)
+                    tags = mp4.tags or {}
+                    # Title: keep existing if present, otherwise use filename stem (strip leading track numbers)
+                    cur_title = tags.get('\xa9nam', [None])[0]
+                    if not cur_title:
+                        stem = os.path.splitext(os.path.basename(fp))[0]
+                        # strip leading NN - or NNN - if present
+                        title = re.sub(r'^\s*\d+\s*-\s*', '', stem).strip()
+                        tags['\xa9nam'] = [title]
+                    # Artist: prefer existing tag, otherwise use uploader
+                    cur_artist = tags.get('\xa9ART', [None])[0]
+                    if not cur_artist and album_artist:
+                        tags['\xa9ART'] = [album_artist]
+                    # Album and album artist
+                    tags['\xa9alb'] = [album_name]
+                    if album_artist:
+                        tags['aART'] = [album_artist]
+
+                    # Track number: attempt to parse from filename if missing
+                    if 'trkn' not in tags:
+                        stem = os.path.splitext(os.path.basename(fp))[0]
+                        m = re.match(r"\s*(\d+)\s*-\s*(.*)", stem)
+                        if m:
+                            try:
+                                tn = int(m.group(1))
+                                tags['trkn'] = [(tn, 0)]
+                            except Exception:
+                                pass
+
+                    # Embed cover art if available
+                    if thumb_path:
+                        try:
+                            with open(thumb_path, 'rb') as tf:
+                                data = tf.read()
+                            fmt = thumb_path.lower()
+                            if fmt.endswith('.png'):
+                                covr = MP4Cover(data, imageformat=MP4Cover.FORMAT_PNG)
+                            else:
+                                covr = MP4Cover(data)
+                            tags['covr'] = [covr]
+                        except Exception:
+                            pass
+
+                    mp4.tags = tags
+                    mp4.save()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Record the processed link to the archive with the album name
         if is_playlist:
             album_name = playlist_title

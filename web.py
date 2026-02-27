@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
@@ -14,6 +14,8 @@ from logging.handlers import RotatingFileHandler
 from main import download_url_to_m4a
 from logging_setup import setup_logging
 from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata
+from db import list_songs
+from mutagen.mp4 import MP4
 import sqlite3
 
 # ----------------------
@@ -203,6 +205,47 @@ async def api_albums():
     except Exception as e:
         logger.exception('api_albums error: %s', e)
         return {'error': str(e)}
+
+
+@app.get('/api/songs')
+async def api_songs():
+    try:
+        songs = list_songs(db_conn)
+        return {'songs': songs}
+    except Exception as e:
+        logger.exception('api_songs error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/api/cover/{song_id}')
+async def api_cover(song_id: int):
+    try:
+        song = get_song(db_conn, song_id)
+        if not song:
+            return Response(status_code=404)
+        path = song.get('filepath')
+        if not path or not Path(path).exists():
+            return Response(status_code=404)
+        try:
+            mp4 = MP4(path)
+            covr = mp4.tags.get('covr')
+            if covr and len(covr) > 0:
+                data = covr[0]
+                # try to guess image type via first bytes
+                if data[:8].startswith(b'\x89PNG'):
+                    ctype = 'image/png'
+                elif data[:3] == b'GIF':
+                    ctype = 'image/gif'
+                else:
+                    ctype = 'image/jpeg'
+                return Response(content=data, media_type=ctype)
+        except Exception:
+            logger.exception('Failed to extract cover art for song %s', song_id)
+            return Response(status_code=204)
+        return Response(status_code=204)
+    except Exception as e:
+        logger.exception('api_cover error: %s', e)
+        return Response(status_code=500)
 
 
 @app.get('/api/albums/{album_id}')

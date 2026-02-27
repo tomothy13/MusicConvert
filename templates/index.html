@@ -2,113 +2,180 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>MusicConvert — Local UI</title>
   <style>
-    body{font-family:system-ui, -apple-system, sans-serif; margin:20px}
-    textarea{width:100%;height:120px}
-    #log{white-space:pre-wrap;background:#111;color:#eee;padding:10px;height:240px;overflow:auto}
-    button{padding:8px 12px;margin-top:8px}
+    :root{--bg:#f6f7fb;--card:#fff;--muted:#6b7280;--accent:#2563eb}
+    body{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background:var(--bg); color:#111; margin:18px}
+    .container{max-width:980px;margin:0 auto}
+    h1{font-size:20px;margin:0 0 8px}
+    .card{background:var(--card);padding:16px;border-radius:10px;box-shadow:0 1px 2px rgba(16,24,40,0.04);margin-bottom:12px}
+    .links-area{display:flex;gap:8px;align-items:flex-start}
+    .links-list{flex:1;display:flex;flex-direction:column;gap:8px}
+    .link-input{width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:8px}
+    .controls{display:flex;gap:8px}
+    button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;color:var(--accent);border:1px solid #dbeafe}
+    #status{white-space:pre-wrap;background:#0f172a;color:#e6eef8;padding:12px;border-radius:8px;height:220px;overflow:auto}
+    .tabs{display:flex;gap:8px;margin-top:10px}
+    .tab{padding:8px 12px;border-radius:8px;background:transparent;cursor:pointer}
+    .tab.active{background:#eef2ff;color:var(--accent)}
+    .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
+    .item{display:flex;gap:8px;align-items:center;background:#fff;padding:8px;border-radius:8px}
+    .cover{width:56px;height:56px;background:#f3f4f6;border-radius:6px;flex:0 0 56px;object-fit:cover}
+    .meta{flex:1}
+    .meta h4{margin:0;font-size:14px}
+    .meta p{margin:2px 0 0;color:var(--muted);font-size:13px}
+    .small{font-size:12px;color:var(--muted)}
+    .search-row{display:flex;gap:8px;align-items:center}
+    .search-row input, .search-row select{padding:8px;border-radius:8px;border:1px solid #e5e7eb}
   </style>
 </head>
 <body>
-  <h2>MusicConvert — Local UI</h2>
-  <p>Paste one or more links (comma or newline separated), then click <em>Start</em>.</p>
-  <form id="form">
-    <textarea name="links" id="links" placeholder="https://youtube.com/...\nhttps://youtube.com/playlist?list=..."></textarea>
-    <br>
-    <button type="submit">Start</button>
-  </form>
-  <h3>Job log</h3>
-  <div id="log">Idle.</div>
-  <div id="download" style="margin-top:8px"></div>
-  <h3 style="margin-top:18px">Albums</h3>
-  <div>
-    <button id="refreshAlbums">Refresh Albums</button>
-    <div id="albums" style="margin-top:8px"></div>
+  <div class="container">
+    <h1>MusicConvert — Local UI</h1>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div><strong>Add YouTube links</strong><div class="small">Add many links and click Convert</div></div>
+        <div class="controls">
+          <button id="addLink">Add</button>
+          <button id="removeLink" class="ghost">Remove</button>
+        </div>
+      </div>
+
+      <div class="links-area">
+        <div class="links-list" id="linksList">
+          <input class="link-input link-box" placeholder="https://youtube.com/..." />
+        </div>
+        <div style="width:140px;display:flex;flex-direction:column;gap:8px">
+          <button id="convertBtn">Convert</button>
+          <button id="clearBtn" class="ghost">Clear</button>
+        </div>
+      </div>
+      <div id="statusArea" style="margin-top:12px">
+        <div id="status" style="display:none">Connecting...</div>
+        <div id="downloadLink" style="margin-top:8px"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="display:flex;flex-direction:column">
+          <strong>Library</strong>
+          <div class="small">Browse albums and songs stored on this host</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <div class="search-row">
+            <input id="search" placeholder="Search" />
+            <select id="sortSelect"><option value="alpha">Alphabetical</option><option value="newest">Newest</option></select>
+            <button id="refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs" style="margin-top:10px">
+        <div class="tab active" data-tab="albums">Albums</div>
+        <div class="tab" data-tab="songs">Songs</div>
+      </div>
+
+      <div id="gridArea">
+        <div id="albumsView" class="list"></div>
+        <div id="songsView" class="list" style="display:none"></div>
+      </div>
+    </div>
   </div>
 
 <script>
-const form = document.getElementById('form');
-const log = document.getElementById('log');
-const download = document.getElementById('download');
-
-function append(msg){
-  log.textContent += '\n' + msg;
-  log.scrollTop = log.scrollHeight;
-}
-
-form.addEventListener('submit', async (ev) =>{
-  ev.preventDefault();
-  log.textContent = '';
-  download.innerHTML = '';
-  const data = new FormData(form);
-  const res = await fetch('/enqueue', { method:'POST', body: data });
-  const json = await res.json();
-  if(json.job_id){
-    const jid = json.job_id;
-    append('Job started: ' + jid);
-    const ws = new WebSocket(`ws://${location.host}/ws/${jid}`);
-    ws.onmessage = (ev) => {
-      const txt = ev.data;
-      if(txt === 'ZIP_CREATED') append('ZIP created on server');
-      else if(txt.startsWith('ZIP_READY:')){
-        const name = txt.split(':',2)[1];
-        download.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
-      } else if(txt === '__DONE__'){
-        append('Job complete');
-        ws.close();
-      } else {
-        append(txt);
-      }
-    };
-    ws.onerror = (e)=> append('WebSocket error');
-    ws.onclose = ()=> append('WS closed');
-  } else {
-    append('Failed to start job');
-  }
+// Link box management
+const linksList = document.getElementById('linksList');
+document.getElementById('addLink').addEventListener('click', ()=>{
+  const inp = document.createElement('input'); inp.className='link-input link-box'; inp.placeholder='https://youtube.com/...' ;
+  linksList.appendChild(inp);
+  inp.focus();
+});
+document.getElementById('removeLink').addEventListener('click', ()=>{
+  const boxes = document.querySelectorAll('.link-box'); if(boxes.length>1) boxes[boxes.length-1].remove();
+});
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  document.querySelectorAll('.link-box').forEach((b,i)=>{ if(i>0) b.remove(); else b.value=''; });
 });
 
-  // Albums UI
-  document.getElementById('refreshAlbums').addEventListener('click', async ()=>{
-    const out = document.getElementById('albums');
-    out.textContent = 'Loading...';
-    const res = await fetch('/api/albums');
-    const json = await res.json();
-    out.innerHTML = '';
-    if(json.albums && json.albums.length){
-      json.albums.forEach(a => {
-        const div = document.createElement('div');
-        div.innerHTML = `<strong>${a.name}</strong> <a href="#" data-id="${a.id}" class="view">View</a> <a href="/download/album/${a.id}">Download ZIP</a>`;
-        out.appendChild(div);
-      });
-      // attach click handlers
-      out.querySelectorAll('.view').forEach(el => el.addEventListener('click', async (ev)=>{
-        ev.preventDefault();
-        const id = ev.target.getAttribute('data-id');
-        const res = await fetch('/api/albums/' + id);
-        const album = await res.json();
-        const details = document.createElement('div');
-        details.innerHTML = `<h4>${album.name}</h4>`;
-        const list = document.createElement('ul');
-        album.songs.forEach(s => {
-          const li = document.createElement('li');
-          const title = s.title || s.filename;
-          li.innerHTML = `${title} - <a href="/download/song/${s.id}">Download</a>`;
-          list.appendChild(li);
-        });
-        // replace albums div with details temporarily
-        out.innerHTML = '';
-        out.appendChild(details);
-        out.appendChild(list);
-        const back = document.createElement('div');
-        back.innerHTML = '<a href="#" id="backToAlbums">Back to albums</a>';
-        out.appendChild(back);
-        document.getElementById('backToAlbums').addEventListener('click', (e)=>{ e.preventDefault(); document.getElementById('refreshAlbums').click(); });
-      }));
-    } else {
-      out.textContent = 'No albums found.';
-    }
-  });
+// Convert button: gather links and post to /enqueue
+const convertBtn = document.getElementById('convertBtn');
+const status = document.getElementById('status');
+const statusArea = document.getElementById('statusArea');
+const downloadLink = document.getElementById('downloadLink');
+convertBtn.addEventListener('click', async ()=>{
+  const vals = Array.from(document.querySelectorAll('.link-box')).map(i=>i.value.trim()).filter(Boolean);
+  if(!vals.length) return alert('Add at least one link');
+  // submit as newline separated
+  const payload = new FormData(); payload.append('links', vals.join('\n'));
+  const res = await fetch('/enqueue', {method:'POST', body: payload});
+  const json = await res.json();
+  if(!json.job_id) return alert('Failed to start job');
+  const jid = json.job_id;
+  // show status box
+  status.style.display='block'; status.textContent = '';
+  downloadLink.innerHTML='';
+  const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws/' + jid);
+  ws.onmessage = (ev)=>{
+    const txt = ev.data;
+    if(txt === 'ZIP_CREATED') append('ZIP created');
+    else if(txt.startsWith('ZIP_READY:')){
+      const name = txt.split(':',2)[1];
+      downloadLink.innerHTML = `<a href="/download/${jid}">Download ${name}</a>`;
+    } else if(txt === '__DONE__'){ append('Job complete'); ws.close(); }
+    else append(txt);
+  };
+  ws.onerror = ()=> append('WebSocket error');
+  function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; }
+});
+
+// Tabs + refresh
+const tabs = document.querySelectorAll('.tab');
+tabs.forEach(t=> t.addEventListener('click', ()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); const tab=t.getAttribute('data-tab'); document.getElementById('albumsView').style.display = tab==='albums'?'grid':'none'; document.getElementById('songsView').style.display = tab==='songs'?'grid':'none'; }));
+
+async function fetchAlbums(){
+  const el = document.getElementById('albumsView'); el.innerHTML='Loading...';
+  const res = await fetch('/api/albums'); const j = await res.json(); el.innerHTML=''; if(!j.albums || !j.albums.length) { el.textContent='No albums found'; return; }
+  for(const a of j.albums.sort((x,y)=>x.name.localeCompare(y.name))){
+    const item = document.createElement('div'); item.className='item';
+    // try to pick cover from first song via API (best-effort)
+    let cover = document.createElement('img'); cover.className='cover'; cover.src='';
+    if(a.songs && a.songs.length){ /* nothing */ }
+    const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${a.name}</h4><p class="small">Album</p>`;
+    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/album/${a.id}" class="small">Download</a>`;
+    item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
+    el.appendChild(item);
+    // try to fetch cover art by asking for the first song in album details
+    (async ()=>{
+      try{
+        const detal = await (await fetch('/api/albums/' + a.id)).json();
+        if(detal.songs && detal.songs.length){
+          const sid = detal.songs[0].id;
+          const c = await fetch('/api/cover/' + sid);
+          if(c.status===200){ cover.src = '/api/cover/' + sid; }
+        }
+      }catch(e){}
+    })();
+  }
+}
+
+async function fetchSongs(){
+  const el = document.getElementById('songsView'); el.innerHTML='Loading...'; const res = await fetch('/api/songs'); const j = await res.json(); el.innerHTML=''; if(!j.songs || !j.songs.length){ el.textContent='No songs found'; return; }
+  for(const s of j.songs){
+    const item = document.createElement('div'); item.className='item';
+    const cover = document.createElement('img'); cover.className='cover'; cover.src = '/api/cover/' + s.id;
+    const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${s.title || s.filename}</h4><p class="small">${s.artist || ''} — ${s.album_name || ''}</p>`;
+    const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/song/${s.id}" class="small">Download</a>`;
+    item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
+    el.appendChild(item);
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); });
+window.addEventListener('load', ()=>{ fetchAlbums(); fetchSongs(); });
 </script>
 </body>
 </html>
