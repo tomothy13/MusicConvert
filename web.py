@@ -248,6 +248,89 @@ async def api_cover(song_id: int):
         return Response(status_code=500)
 
 
+@app.get('/api/links')
+async def api_links():
+    try:
+        # Scan OUTPUT_ROOT job directories for archive.txt files
+        links = []
+        for jobdir in OUTPUT_ROOT.iterdir():
+            if jobdir.is_dir():
+                af = jobdir / 'archive.txt'
+                if af.exists():
+                    try:
+                        with open(af, 'r', encoding='utf-8') as f:
+                            for ln in f:
+                                ln = ln.strip()
+                                if not ln: continue
+                                parts = ln.split('\t')
+                                if len(parts) >= 2:
+                                    links.append({'album': parts[0], 'url': parts[1], 'job': jobdir.name})
+                                else:
+                                    links.append({'line': ln, 'job': jobdir.name})
+                    except Exception:
+                        logger.exception('Failed to read archive for job %s', jobdir)
+        return {'links': links}
+    except Exception as e:
+        logger.exception('api_links error: %s', e)
+        return {'error': str(e)}
+
+
+@app.get('/api/admin/logs')
+async def api_admin_logs():
+    try:
+        # Return last ~200 lines of server error log
+        log_path = Path(__file__).parent / 'error.log'
+        if not log_path.exists():
+            return {'lines': []}
+        with open(log_path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 8192
+            data = b''
+            while size > 0 and len(data) < 200 * 200:
+                read_size = min(block, size)
+                f.seek(size - read_size)
+                data = f.read(read_size) + data
+                size -= read_size
+            text = data.decode('utf-8', errors='replace')
+            lines = text.strip().splitlines()[-200:]
+        return {'lines': lines}
+    except Exception as e:
+        logger.exception('api_admin_logs error: %s', e)
+        return {'error': str(e)}
+
+
+@app.post('/api/admin/query')
+async def api_admin_query(request: Request):
+    try:
+        # Simple, restricted SQL runner for admins. Requires ADMIN_PASSWORD env var to be set and provided.
+        ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
+        if not ADMIN_PASSWORD:
+            return {'error': 'admin_disabled'}
+        body = await request.json()
+        pwd = body.get('password')
+        query = body.get('query')
+        if pwd != ADMIN_PASSWORD:
+            return {'error': 'unauthorized'}
+        if not query or not isinstance(query, str):
+            return {'error': 'invalid_query'}
+        q = query.strip()
+        # Only allow SELECT queries and single statement
+        if not q.lower().startswith('select') or ';' in q:
+            return {'error': 'only_select_allowed'}
+        # Execute safely
+        conn = sqlite3.connect(str(DB_PATH))
+        cur = conn.cursor()
+        cur.execute(q)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchmany(1000)
+        conn.close()
+        return {'columns': cols, 'rows': rows}
+    except Exception as e:
+        logger.exception('api_admin_query error: %s', e)
+        return {'error': str(e)}
+
+
 @app.get('/api/albums/{album_id}')
 async def api_album(album_id: int):
     try:

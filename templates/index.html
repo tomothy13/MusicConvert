@@ -10,8 +10,8 @@
     .container{max-width:980px;margin:0 auto}
     h1{font-size:20px;margin:0 0 8px}
     .card{background:var(--card);padding:16px;border-radius:10px;box-shadow:0 1px 2px rgba(16,24,40,0.04);margin-bottom:12px}
-    .links-area{display:flex;gap:8px;align-items:flex-start}
-    .links-list{flex:1;display:flex;flex-direction:column;gap:8px}
+    .links-area{display:flex;flex-direction:column;gap:8px}
+    .links-list{display:flex;flex-direction:column;gap:8px}
     .link-input{width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:8px}
     .controls{display:flex;gap:8px}
     button{background:var(--accent);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
@@ -44,15 +44,16 @@
         </div>
       </div>
 
-      <div class="links-area">
-        <div class="links-list" id="linksList">
-          <input class="link-input link-box" placeholder="https://youtube.com/..." />
+        <div class="links-area">
+          <div class="links-list" id="linksList">
+            <input class="link-input link-box" placeholder="https://youtube.com/..." />
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-start;align-items:center;margin-top:6px">
+            <button id="convertBtn">Convert</button>
+            <button id="clearBtn" class="ghost">Clear</button>
+            <button id="addLinkInline" class="ghost">Add link</button>
+          </div>
         </div>
-        <div style="width:140px;display:flex;flex-direction:column;gap:8px">
-          <button id="convertBtn">Convert</button>
-          <button id="clearBtn" class="ghost">Clear</button>
-        </div>
-      </div>
       <div id="statusArea" style="margin-top:12px">
         <div id="status" style="display:none">Connecting...</div>
         <div id="downloadLink" style="margin-top:8px"></div>
@@ -89,32 +90,43 @@
 <script>
 // Link box management
 const linksList = document.getElementById('linksList');
-document.getElementById('addLink').addEventListener('click', ()=>{
-  const inp = document.createElement('input'); inp.className='link-input link-box'; inp.placeholder='https://youtube.com/...' ;
-  linksList.appendChild(inp);
-  inp.focus();
-});
-document.getElementById('removeLink').addEventListener('click', ()=>{
-  const boxes = document.querySelectorAll('.link-box'); if(boxes.length>1) boxes[boxes.length-1].remove();
-});
+document.getElementById('addLink').addEventListener('click', addLinkBox);
+document.getElementById('addLinkInline').addEventListener('click', addLinkBox);
+document.getElementById('removeLink').addEventListener('click', ()=>{ const boxes = document.querySelectorAll('.link-box'); if(boxes.length>1) boxes[boxes.length-1].remove(); });
 document.getElementById('clearBtn').addEventListener('click', ()=>{
   document.querySelectorAll('.link-box').forEach((b,i)=>{ if(i>0) b.remove(); else b.value=''; });
 });
+
+function addLinkBox(){ const inp=document.createElement('input'); inp.className='link-input link-box'; inp.placeholder='https://youtube.com/...'; inp.addEventListener('input', validateAllLinks); linksList.appendChild(inp); inp.focus(); }
+
+// Validation: require a YouTube playlist/album link (contains list=) and youtube host
+function isYouTubeAlbumLink(v){ if(!v) return true; try{ const u=new URL(v); const h=u.hostname.toLowerCase(); if(!(h.includes('youtube.com')||h.includes('youtu.be'))) return false; // require playlist/list param for album
+  if(u.searchParams && u.searchParams.get('list')) return true; // typical playlist URL
+  // youtu.be short links are single videos, treat as invalid for album-only requirement
+  return false; }catch(e){ return false; }}
+
+function validateAllLinks(){ let anyInvalid=false; document.querySelectorAll('.link-box').forEach(inp=>{ const ok=isYouTubeAlbumLink(inp.value.trim()); if(!ok){ inp.style.border='2px solid #ef4444'; inp.dataset.invalid='1'; anyInvalid=true; } else { inp.style.border='1px solid #e5e7eb'; delete inp.dataset.invalid; } }); document.getElementById('convertBtn').disabled = anyInvalid; return !anyInvalid; }
+
+// attach early validators
+document.querySelectorAll('.link-box').forEach(i=>i.addEventListener('input', validateAllLinks));
 
 // Convert button: gather links and post to /enqueue
 const convertBtn = document.getElementById('convertBtn');
 const status = document.getElementById('status');
 const statusArea = document.getElementById('statusArea');
 const downloadLink = document.getElementById('downloadLink');
+let jobRunning = false;
 convertBtn.addEventListener('click', async ()=>{
   const vals = Array.from(document.querySelectorAll('.link-box')).map(i=>i.value.trim()).filter(Boolean);
   if(!vals.length) return alert('Add at least one link');
+  if(!validateAllLinks()) return alert('One or more links are invalid');
   // submit as newline separated
   const payload = new FormData(); payload.append('links', vals.join('\n'));
   const res = await fetch('/enqueue', {method:'POST', body: payload});
   const json = await res.json();
   if(!json.job_id) return alert('Failed to start job');
   const jid = json.job_id;
+  jobRunning = true;
   // show status box
   status.style.display='block'; status.textContent = '';
   downloadLink.innerHTML='';
@@ -130,6 +142,7 @@ convertBtn.addEventListener('click', async ()=>{
   };
   ws.onerror = ()=> append('WebSocket error');
   function append(m){ status.textContent += m + '\n'; status.scrollTop = status.scrollHeight; }
+  ws.addEventListener('close', ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); });
 });
 
 // Tabs + refresh
@@ -176,6 +189,9 @@ async function fetchSongs(){
 
 document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); });
 window.addEventListener('load', ()=>{ fetchAlbums(); fetchSongs(); });
+
+// Auto-refresh every 30s unless a job is running
+setInterval(()=>{ if(!jobRunning){ fetchAlbums(); fetchSongs(); } }, 30000);
 </script>
 </body>
 </html>
