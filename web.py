@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 
 from main import download_url_to_m4a, sanitize_filename
 from logging_setup import setup_logging
-from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata, update_album_art, add_link
+from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata, update_album_art, add_link, update_album_zip
 from db import list_songs, list_links
 from mutagen.mp4 import MP4
 import sqlite3
@@ -48,6 +48,22 @@ class MusicConvertServer:
         # job_id -> asyncio.Queue[str]
         self.job_queues: dict[str, asyncio.Queue] = {}
         self.job_zip_paths: dict[str, Path] = {}
+        # job_id -> list[str] recent log lines
+        self.job_logs: dict[str, list[str]] = {}
+
+    async def emit_log(self, job_id: str, msg: str):
+        """Append a message to the job's log buffer and push to the queue if present."""
+        lst = self.job_logs.setdefault(job_id, [])
+        lst.append(msg)
+        # cap buffer size
+        if len(lst) > 2000:
+            del lst[0:len(lst)-2000]
+        q = self.job_queues.get(job_id)
+        if q:
+            try:
+                await q.put(msg)
+            except Exception:
+                logger.exception('Failed to put message onto job queue %s', job_id)
 
     # Route: index page
     async def index(self, request: Request):
@@ -72,9 +88,23 @@ class MusicConvertServer:
 
     # Route: WebSocket for logs
     async def ws_handler(self, websocket: WebSocket, job_id: str):
+        # Accept connection. If the job is active, stream its queue. If the job already finished
+        # but has a ZIP, allow a one-off connection to report ZIP_READY so clients can download.
         await websocket.accept()
         q = self.job_queues.get(job_id)
         if q is None:
+            zip_path = self.job_zip_paths.get(job_id)
+            if zip_path and zip_path.exists():
+                try:
+                    await websocket.send_text(f'ZIP_READY:{zip_path.name}')
+                except Exception:
+                    pass
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+                logger.info('WebSocket one-off ZIP_READY sent for finished job %s', job_id)
+                return
             await websocket.send_text('Unknown job id')
             await websocket.close()
             logger.warning('WebSocket connection for unknown job id: %s', job_id)
@@ -121,11 +151,11 @@ class MusicConvertServer:
         archive_file = str(job_dir / 'archive.txt')
         error_file = str(job_dir / 'error.txt')
 
-        await q.put(f'Job {job_id} started, {len(links)} link(s)')
+        await self.emit_log(job_id, f'Job {job_id} started, {len(links)} link(s)')
 
         conn = db_conn
         for idx, link in enumerate(links, start=1):
-            await q.put(f'[{idx}/{len(links)}] Starting: {link}')
+            await self.emit_log(job_id, f'[{idx}/{len(links)}] Starting: {link}')
             try:
                 # Probe the link to obtain playlist/title information for duplication checks
                 try:
@@ -142,7 +172,7 @@ class MusicConvertServer:
                         cur = conn.cursor()
                         cur.execute('SELECT id FROM albums WHERE lower(name) = ?', (probe_title.lower(),))
                         if cur.fetchone():
-                            await q.put(f'[{idx}/{len(links)}] Skipping: album "{probe_title}" already exists in database')
+                            await self.emit_log(job_id, f'[{idx}/{len(links)}] Skipping: album "{probe_title}" already exists in database')
                             try:
                                 add_link(conn, link, 'skipped:album_exists')
                             except Exception:
@@ -173,7 +203,7 @@ class MusicConvertServer:
                     already_seen = False
 
                 if already_seen:
-                    await q.put(f'[{idx}/{len(links)}] Skipping: link already processed previously')
+                    await self.emit_log(job_id, f'[{idx}/{len(links)}] Skipping: link already processed previously')
                     try:
                         add_link(conn, link, 'skipped:already_seen')
                     except Exception:
@@ -192,7 +222,8 @@ class MusicConvertServer:
                         except Exception:
                             await asyncio.sleep(0.1)
                             continue
-                        await out_q.put(msg)
+                        # write into server logs as well
+                        await self.emit_log(job_id, msg)
                         if msg == '__DL_DONE__':
                             break
 
@@ -208,14 +239,14 @@ class MusicConvertServer:
                 # wait for forwarder to finish consuming progress messages
                 await forwarder
 
-                await q.put(f'[{idx}/{len(links)}] Finished: {link} -> {"OK" if ok else "FAILED"}')
+                await self.emit_log(job_id, f'[{idx}/{len(links)}] Finished: {link} -> {"OK" if ok else "FAILED"}')
                 try:
                     add_link(conn, link, 'success' if ok else 'failed')
                 except Exception:
                     pass
             except Exception as e:
                 logger.exception('Error processing link %s for job %s: %s', link, job_id, e)
-                await q.put(f'[{idx}/{len(links)}] Exception: {e}')
+                await self.emit_log(job_id, f'[{idx}/{len(links)}] Exception: {e}')
                 try:
                     add_link(conn, link, f'error:{e}')
                 except Exception:
@@ -223,7 +254,19 @@ class MusicConvertServer:
 
         # Populate DB with albums/songs found in job_dir
         try:
-            await q.put('Indexing files into database...')
+            await self.emit_log(job_id, 'Indexing files into database...')
+            # Debug: list job_dir contents for troubleshooting
+            try:
+                total_files = 0
+                total_dirs = 0
+                for p in job_dir.rglob('*'):
+                    if p.is_file():
+                        total_files += 1
+                    elif p.is_dir():
+                        total_dirs += 1
+                await self.emit_log(job_id, f'Indexing: found {total_dirs} directories and {total_files} files under job dir')
+            except Exception:
+                pass
             # Use db_conn created at module scope
             conn = db_conn
             # Scan directories: each subdirectory is treated as an album
@@ -231,12 +274,17 @@ class MusicConvertServer:
                 if entry.is_dir():
                     album_name = entry.name
                     album_id = create_album(conn, album_name, str(entry))
+                    await self.emit_log(job_id, f'Indexing album folder: {album_name}')
                     # collect potential album artist/cover from first song
                     album_artist = None
                     album_art = None
                     for f in entry.rglob('*.m4a'):
                         meta = extract_metadata(str(f))
-                        sid = add_song(conn, album_id, f.name, str(f), meta)
+                        try:
+                            sid = add_song(conn, album_id, f.name, str(f), meta)
+                            await self.emit_log(job_id, f'Added song: {f.name} -> song_id={sid}')
+                        except Exception as e:
+                            await self.emit_log(job_id, f'Failed to add song {f.name}: {e}')
                         # try to read embedded cover using mutagen
                         try:
                             m = MP4(str(f))
@@ -258,25 +306,29 @@ class MusicConvertServer:
                         try:
                             if album_art:
                                 update_album_art(conn, album_id, album_artist, album_art)
+                                await self.emit_log(job_id, f'Updated album art for album {album_name}')
                             elif album_artist:
                                 update_album_art(conn, album_id, album_artist, None)
+                                await self.emit_log(job_id, f'Updated album artist for album {album_name}: {album_artist}')
+                            else:
+                                await self.emit_log(job_id, f'No album artist/art found for {album_name}')
                         except Exception:
-                            pass
+                            await self.emit_log(job_id, f'Failed to update album {album_name} metadata')
                 elif entry.is_file() and entry.suffix.lower() in ('.m4a', '.m4a'):
                     # single-file downloads: create an album for the job if needed
                     album_name = f'job_{job_id}'
                     album_id = create_album(conn, album_name, str(job_dir))
                     meta = extract_metadata(str(entry))
                     add_song(conn, album_id, entry.name, str(entry), meta)
-            await q.put('Indexing complete')
+            await self.emit_log(job_id, 'Indexing complete')
         except Exception as e:
             logger.exception('Failed to index job %s into database: %s', job_id, e)
-            await q.put(f'Indexing error: {e}')
+            await self.emit_log(job_id, f'Indexing error: {e}')
 
         # create zip archive AFTER indexing so files are present and DB reflects them
         zip_name = f'music_{job_id}.zip'
         zip_path = OUTPUT_ROOT / zip_name
-        await q.put('Creating ZIP archive...')
+        await self.emit_log(job_id, 'Creating ZIP archive...')
         try:
             added_count = 0
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -290,19 +342,19 @@ class MusicConvertServer:
                         except Exception:
                             logger.exception('Failed to add file %s to zip for job %s', full, job_id)
             # Always notify client a ZIP creation attempt completed; then provide READY state
-            await q.put('ZIP_CREATED')
+            await self.emit_log(job_id, 'ZIP_CREATED')
             if added_count > 0:
                 self.job_zip_paths[job_id] = zip_path
                 # notify immediately that the ZIP is ready for download
-                await q.put(f'ZIP_READY:{zip_path.name}')
+                await self.emit_log(job_id, f'ZIP_READY:{zip_path.name}')
             else:
                 # signal empty so client shows helpful message
-                await q.put('ZIP_READY:empty')
+                await self.emit_log(job_id, 'ZIP_READY:empty')
         except Exception as e:
             logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
-            await q.put(f'Failed to create ZIP: {e}')
+            await self.emit_log(job_id, f'Failed to create ZIP: {e}')
 
-        await q.put('__DONE__')
+        await self.emit_log(job_id, '__DONE__')
         # remove this job from active queues so admin list clears
         try:
             self.job_queues.pop(job_id, None)
@@ -468,6 +520,16 @@ async def api_admin_jobs():
         return {'error': str(e)}
 
 
+@app.get('/api/jobs/{job_id}/logs')
+async def api_job_logs(job_id: str):
+    try:
+        logs = server.job_logs.get(job_id, [])
+        return {'lines': logs}
+    except Exception as e:
+        logger.exception('api_job_logs error: %s', e)
+        return {'error': str(e)}
+
+
 @app.post('/api/admin/query')
 async def api_admin_query(request: Request):
     try:
@@ -550,6 +612,14 @@ async def download_album(album_id: int):
                         logger.exception('Failed to add %s to album zip %s', fp, zip_path)
         if added == 0:
             return {'status': 'empty'}
+        try:
+            # persist zip path to album record
+            try:
+                update_album_zip(db_conn, album.get('id'), str(zip_path))
+            except Exception:
+                logger.exception('Failed to update album zip path for album %s', album.get('id'))
+        except Exception:
+            pass
         return FileResponse(str(zip_path), filename=zip_name, media_type='application/zip')
     except Exception as e:
         logger.exception('download_album error: %s', e)

@@ -160,45 +160,44 @@ convertBtn.addEventListener('click', async ()=>{
   jobRunning = true;
   status.textContent = '';
   downloadLink.innerHTML='';
-  let wsRetries = 0;
-  function connectWS(){
-    const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jid);
-    ws.onopen = ()=>{ wsRetries = 0; };
-    ws.onmessage = (ev)=>{
-      const txt = ev.data;
-      // simplify messages for the status box
-      if(txt === 'ZIP_CREATED') { status.textContent += 'ZIP created\n'; }
-      else if(txt.startsWith('ZIP_READY:')){
-        const name = txt.split(':',2)[1];
-        if(name === 'empty'){
-          status.textContent += 'ZIP created but contains no files\n';
-        } else {
-          // Create a proper download action (handled below) and show link
-          downloadLink.innerHTML = `<a href="/download/${jid}" data-dl="album" data-id="${jid}" class="dl small">Download ${name}</a>`;
-        }
-      } else if(txt === '__DONE__'){ status.textContent += 'Job complete\n'; try{ ws.close(); }catch(e){} }
-      else {
-        // prettify common yt-dlp messages
-        if(txt.startsWith('downloading:')){
-          const parts = txt.split(':');
-          const pct = parts[1] || '';
-          status.textContent += `Downloading ${pct}%\n`;
+  // Polling-based log retrieval (replaces WebSocket)
+  let pollInterval = null;
+  async function pollLogs(){
+    try{
+      const r = await fetch('/api/jobs/' + jid + '/logs');
+      const j = await r.json();
+      const lines = j.lines || [];
+      // render lines with lightweight prettifying
+      let out = '';
+      for(const txt of lines){
+        if(txt === 'ZIP_CREATED') { out += 'ZIP created\n'; }
+        else if(txt.startsWith('ZIP_READY:')){
+          const name = txt.split(':',2)[1];
+          if(name === 'empty'){ out += 'ZIP created but contains no files\n'; }
+          else { downloadLink.innerHTML = `<a href="/download/${jid}" data-dl="album" data-id="${jid}" class="dl small">Download ${name}</a>`; }
+        } else if(txt === '__DONE__'){ out += 'Job complete\n'; }
+        else if(txt.startsWith('downloading:')){
+          const parts = txt.split(':'); const pct = parts[1] || ''; out += `Downloading ${pct}%\n`;
         } else if(txt.startsWith('finished:')){
-          const fn = txt.split(':',2)[1] || '';
-          status.textContent += `Finished: ${fn}\n`;
-        } else {
-          status.textContent += txt + '\n';
-        }
-        status.scrollTop = status.scrollHeight;
+          const fn = txt.split(':',2)[1] || ''; out += `Finished: ${fn}\n`;
+        } else { out += txt + '\n'; }
       }
-    };
-    ws.onerror = ()=>{
-      if(wsRetries < 3){ wsRetries++; setTimeout(connectWS, 500); }
-      else { status.textContent += 'WebSocket error\n'; }
-    };
-    ws.onclose = ()=>{ jobRunning=false; fetchAlbums(); fetchSongs(); };
+      status.textContent = out;
+      status.scrollTop = status.scrollHeight;
+      // stop polling when job signals done
+      if(lines.includes('__DONE__')){
+        clearInterval(pollInterval);
+        jobRunning = false;
+        fetchAlbums(); fetchSongs();
+      }
+    }catch(e){
+      // network error - stop after a while
+      console.error('pollLogs error', e);
+    }
   }
-  connectWS();
+  // start immediate poll and then interval
+  pollLogs();
+  pollInterval = setInterval(pollLogs, 1200);
 });
 
 // status is shown below the convert controls and updates with job progress
@@ -269,15 +268,23 @@ async function fetchAdmin(){
   }catch(e){ jobsEl.textContent = 'Failed to load jobs'; }
 }
 
-let adminJobWS = null;
+let adminPoller = null;
 function openJobStream(jobId){
-  if(adminJobWS){ try{ adminJobWS.close(); }catch(e){} adminJobWS=null; }
+  if(adminPoller){ clearInterval(adminPoller); adminPoller = null; }
   const logsEl = document.getElementById('adminLogs');
   logsEl.textContent = 'Connecting to job ' + jobId + '...\n';
-  adminJobWS = new WebSocket(location.origin.replace(/^http/, 'ws') + '/ws/' + jobId);
-  adminJobWS.onmessage = (ev)=>{ logsEl.textContent += ev.data + '\n'; logsEl.scrollTop = logsEl.scrollHeight; };
-  adminJobWS.onclose = ()=>{ logsEl.textContent += '\n[connection closed]\n'; };
-  adminJobWS.onerror = ()=>{ logsEl.textContent += '\n[error connecting]\n'; };
+  async function pollAdmin(){
+    try{
+      const r = await fetch('/api/jobs/' + jobId + '/logs');
+      const j = await r.json();
+      const lines = j.lines || [];
+      logsEl.textContent = lines.join('\n');
+      logsEl.scrollTop = logsEl.scrollHeight;
+      if(lines.includes('__DONE__')){ clearInterval(adminPoller); adminPoller = null; logsEl.textContent += '\n[done]\n'; }
+    }catch(e){ logsEl.textContent += '\n[error polling]\n'; clearInterval(adminPoller); adminPoller = null; }
+  }
+  pollAdmin();
+  adminPoller = setInterval(pollAdmin, 1200);
 }
 
 document.getElementById('refresh').addEventListener('click', ()=>{ fetchAlbums(); fetchSongs(); });

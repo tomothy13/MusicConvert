@@ -18,6 +18,7 @@ def init_db(db_path: str | Path):
         directory TEXT,
         artist TEXT,
         art BLOB,
+        zip_path TEXT,
         created_at REAL NOT NULL
     )
     ''')
@@ -46,6 +47,15 @@ def init_db(db_path: str | Path):
     )
     ''')
     conn.commit()
+    # Ensure older DBs get the zip_path column if missing
+    try:
+        cur.execute("PRAGMA table_info(albums)")
+        cols = [r[1] for r in cur.fetchall()]
+        if 'zip_path' not in cols:
+            cur.execute('ALTER TABLE albums ADD COLUMN zip_path TEXT')
+            conn.commit()
+    except Exception:
+        pass
     return conn
 
 
@@ -72,6 +82,15 @@ def update_album_art(conn: sqlite3.Connection, album_id: int, artist: str | None
             cur.execute('UPDATE albums SET artist = ? WHERE id = ?', (artist, album_id))
         elif art_bytes is not None:
             cur.execute('UPDATE albums SET art = ? WHERE id = ?', (art_bytes, album_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
+def update_album_zip(conn: sqlite3.Connection, album_id: int, zip_path: str | None):
+    cur = conn.cursor()
+    try:
+        cur.execute('UPDATE albums SET zip_path = ? WHERE id = ?', (zip_path, album_id))
         conn.commit()
     except Exception:
         conn.rollback()
