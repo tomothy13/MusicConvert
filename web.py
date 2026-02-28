@@ -127,7 +127,8 @@ class MusicConvertServer:
                     # Client disconnected; stop sending further messages
                     logger.info('WebSocket client disconnected for job %s', job_id)
                     break
-                    if msg == '__DONE__':
+                # If the job finished, notify client about ZIP readiness and close
+                if msg == '__DONE__':
                     contents = self.job_contents.get(job_id)
                     if contents:
                         try:
@@ -138,6 +139,7 @@ class MusicConvertServer:
                         await websocket.close()
                     except Exception:
                         pass
+                    break
                     break
         except Exception as e:
             logger.exception('Exception in ws_handler for job %s: %s', job_id, e)
