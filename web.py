@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import HTMLResponse, FileResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
@@ -9,22 +9,28 @@ import zipfile
 from pathlib import Path
 import queue
 import logging
+import tempfile
 from logging.handlers import RotatingFileHandler
 
 from main import download_url_to_m4a, sanitize_filename
 from logging_setup import setup_logging
 from db import init_db, create_album, add_song, list_albums, get_album, get_song, extract_metadata, update_album_art, add_link, update_album_zip
 from db import list_songs, list_links
-from mutagen.mp4 import MP4
+from mutagen.mp4 import MP4, MP4Cover
 import sqlite3
+import subprocess
+import re
 import yt_dlp
 
 # ----------------------
 # Configuration & Setup
 # ----------------------
 HERE = Path(__file__).parent.resolve()
-OUTPUT_ROOT = HERE / 'web_output'
-OUTPUT_ROOT.mkdir(exist_ok=True)
+# central data directory (keeps outputs out of repo root)
+DATA_ROOT = HERE / 'data'
+DATA_ROOT.mkdir(exist_ok=True)
+OUTPUT_ROOT = DATA_ROOT / 'files'
+OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Initialize centralized logging for the web process
 logger = setup_logging('musicconvert.web')
@@ -47,7 +53,8 @@ class MusicConvertServer:
     def __init__(self):
         # job_id -> asyncio.Queue[str]
         self.job_queues: dict[str, asyncio.Queue] = {}
-        self.job_zip_paths: dict[str, Path] = {}
+        # job_id -> list of (arcname, filepath) tuples for on-demand zipping
+        self.job_contents: dict[str, list[tuple[str,str]]] = {}
         # job_id -> list[str] recent log lines
         self.job_logs: dict[str, list[str]] = {}
 
@@ -93,10 +100,12 @@ class MusicConvertServer:
         await websocket.accept()
         q = self.job_queues.get(job_id)
         if q is None:
-            zip_path = self.job_zip_paths.get(job_id)
-            if zip_path and zip_path.exists():
+            contents = self.job_contents.get(job_id)
+            if contents:
+                # derive a friendly name
+                zip_name = f'music_{job_id}.zip'
                 try:
-                    await websocket.send_text(f'ZIP_READY:{zip_path.name}')
+                    await websocket.send_text(f'ZIP_READY:{zip_name}')
                 except Exception:
                     pass
                 try:
@@ -118,11 +127,11 @@ class MusicConvertServer:
                     # Client disconnected; stop sending further messages
                     logger.info('WebSocket client disconnected for job %s', job_id)
                     break
-                if msg == '__DONE__':
-                    zip_path = self.job_zip_paths.get(job_id)
-                    if zip_path:
+                    if msg == '__DONE__':
+                    contents = self.job_contents.get(job_id)
+                    if contents:
                         try:
-                            await websocket.send_text(f'ZIP_READY:{zip_path.name}')
+                            await websocket.send_text(f'ZIP_READY:music_{job_id}.zip')
                         except Exception:
                             logger.info('WebSocket client disconnected before ZIP_READY for job %s', job_id)
                     try:
@@ -139,10 +148,42 @@ class MusicConvertServer:
 
     # Route: download resulting ZIP
     async def download(self, job_id: str):
-        zip_path = self.job_zip_paths.get(job_id)
-        if not zip_path or not zip_path.exists():
+        # Create and stream a temporary ZIP on demand from the job's recorded contents.
+        contents = self.job_contents.get(job_id)
+        if not contents:
             return {"status": "not_ready"}
-        return FileResponse(path=str(zip_path), filename=zip_path.name, media_type='application/zip')
+        # create temp zip file
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+            tmp_name = tmp.name
+            tmp.close()
+            with zipfile.ZipFile(tmp_name, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for arcname, fp in contents:
+                    try:
+                        if os.path.exists(fp):
+                            zf.write(fp, arcname=arcname)
+                    except Exception:
+                        logger.exception('Failed to add %s to temp zip for job %s', fp, job_id)
+
+            def _stream_file(path):
+                try:
+                    with open(path, 'rb') as fh:
+                        while True:
+                            chunk = fh.read(64 * 1024)
+                            if not chunk:
+                                break
+                            yield chunk
+                finally:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+
+            headers = {'Content-Disposition': f'attachment; filename="music_{job_id}.zip"'}
+            return StreamingResponse(_stream_file(tmp_name), media_type='application/zip', headers=headers)
+        except Exception as e:
+            logger.exception('Failed to create/stream zip for job %s: %s', job_id, e)
+            return {'error': str(e)}
 
     # Background worker: process links and emit log messages
     async def _process_links(self, job_id: str, links: list[str], q: asyncio.Queue):
@@ -278,27 +319,93 @@ class MusicConvertServer:
                     # collect potential album artist/cover from first song
                     album_artist = None
                     album_art = None
-                    for f in entry.rglob('*.m4a'):
-                        meta = extract_metadata(str(f))
+                    # collect audio files of several common extensions; prefer .m4a if present
+                    audio_exts = ('.m4a', '.mp4', '.mp3', '.webm', '.m4b', '.mkv', '.opus')
+                    files = [p for p in entry.rglob('*') if p.is_file() and p.suffix.lower() in audio_exts]
+                    # sort so .m4a preferred first
+                    files.sort(key=lambda p: 0 if p.suffix.lower()=='.m4a' else 1)
+                    # pick thumbs if present
+                    thumb = None
+                    for ext in ('.jpg', '.jpeg', '.png', '.webp'):
+                        t = next((p for p in entry.glob(f'*{ext}') if p.is_file()), None)
+                        if t:
+                            thumb = t
+                            break
+                    for f in files:
                         try:
-                            sid = add_song(conn, album_id, f.name, str(f), meta)
-                            await self.emit_log(job_id, f'Added song: {f.name} -> song_id={sid}')
-                        except Exception as e:
-                            await self.emit_log(job_id, f'Failed to add song {f.name}: {e}')
-                        # try to read embedded cover using mutagen
-                        try:
-                            m = MP4(str(f))
-                            covr = m.tags.get('covr') if m.tags else None
-                            if covr and len(covr) > 0 and album_art is None:
+                            target = f
+                            # Prefer to trust downloader to produce .m4a files.
+                            # If file is an MP4/M4A container, attempt to write/read MP4 tags and cover art.
+                            meta = {}
+                            if f.suffix.lower() in ('.m4a', '.mp4'):
                                 try:
-                                    album_art = bytes(covr[0])
+                                    mp4 = MP4(str(target))
+                                    tags = mp4.tags or {}
+                                    # Title
+                                    cur_title = tags.get('\xa9nam', [None])[0]
+                                    if not cur_title:
+                                        stem = target.stem
+                                        title = re.sub(r'^\s*\d+\s*-\s*', '', stem).strip()
+                                        tags['\xa9nam'] = [title]
+                                    # Artist
+                                    cur_artist = tags.get('\xa9ART', [None])[0]
+                                    if not cur_artist and album_artist:
+                                        tags['\xa9ART'] = [album_artist]
+                                    # Album
+                                    tags['\xa9alb'] = [album_name]
+                                    if album_artist:
+                                        tags['aART'] = [album_artist]
+                                    # Track parse
+                                    if 'trkn' not in tags:
+                                        mtr = re.match(r"\s*(\d+)\s*-\s*(.*)", target.stem)
+                                        if mtr:
+                                            try:
+                                                tn = int(mtr.group(1))
+                                                tags['trkn'] = [(tn, 0)]
+                                            except Exception:
+                                                pass
+                                    # embed cover if a thumbnail image exists
+                                    if thumb:
+                                        try:
+                                            with open(thumb, 'rb') as tfp:
+                                                data = tfp.read()
+                                            if thumb.suffix.lower() == '.png':
+                                                covr = MP4Cover(data, imageformat=MP4Cover.FORMAT_PNG)
+                                            else:
+                                                covr = MP4Cover(data)
+                                            tags['covr'] = [covr]
+                                        except Exception:
+                                            pass
+                                    mp4.tags = tags
+                                    mp4.save()
                                 except Exception:
-                                    try:
-                                        album_art = covr[0]
-                                    except Exception:
-                                        album_art = None
-                        except Exception:
-                            pass
+                                    # Not a valid MP4 container or tagging failed; continue without tagging
+                                    pass
+                                # Extract metadata via ffprobe/mutagen
+                                meta = extract_metadata(str(target))
+                                sid = add_song(conn, album_id, target.name, str(target), meta)
+                                await self.emit_log(job_id, f'Added song: {target.name} -> song_id={sid}')
+                                # try to pull embedded cover art from file
+                                try:
+                                    m2 = MP4(str(target))
+                                    covr = m2.tags.get('covr') if m2.tags else None
+                                    if covr and len(covr) > 0 and album_art is None:
+                                        try:
+                                            album_art = bytes(covr[0])
+                                        except Exception:
+                                            try:
+                                                album_art = covr[0]
+                                            except Exception:
+                                                album_art = None
+                                except Exception:
+                                    pass
+                            else:
+                                # Non-m4a files: record metadata and add to DB, but do not transcode here.
+                                meta = extract_metadata(str(target))
+                                sid = add_song(conn, album_id, target.name, str(target), meta)
+                                await self.emit_log(job_id, f'Added non-m4a file (no transcode): {target.name} -> song_id={sid}')
+                        except Exception as e:
+                            await self.emit_log(job_id, f'Failed processing file {f}: {e}')
                         if not album_artist and meta.get('artist'):
                             album_artist = meta.get('artist')
                     # update album with artist and art blob if found
@@ -321,38 +428,62 @@ class MusicConvertServer:
                     meta = extract_metadata(str(entry))
                     add_song(conn, album_id, entry.name, str(entry), meta)
             await self.emit_log(job_id, 'Indexing complete')
+            # remove job-level archive/error files (not needed)
+            try:
+                af = job_dir / 'archive.txt'
+                ef = job_dir / 'error.txt'
+                if af.exists():
+                    af.unlink()
+                if ef.exists():
+                    ef.unlink()
+                await self.emit_log(job_id, 'Removed job archive/error files')
+            except Exception:
+                pass
         except Exception as e:
             logger.exception('Failed to index job %s into database: %s', job_id, e)
             await self.emit_log(job_id, f'Indexing error: {e}')
 
-        # create zip archive AFTER indexing so files are present and DB reflects them
-        zip_name = f'music_{job_id}.zip'
-        zip_path = OUTPUT_ROOT / zip_name
-        await self.emit_log(job_id, 'Creating ZIP archive...')
+        # Prepare a list of files for on-demand zipping (don't persist zip to project directory)
+        await self.emit_log(job_id, 'Preparing files for ZIP (on-demand)...')
         try:
             added_count = 0
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(job_dir):
-                    for f in files:
-                        full = Path(root) / f
-                        rel = full.relative_to(job_dir)
-                        try:
-                            zf.write(full, arcname=rel)
-                            added_count += 1
-                        except Exception:
-                            logger.exception('Failed to add file %s to zip for job %s', full, job_id)
-            # Always notify client a ZIP creation attempt completed; then provide READY state
-            await self.emit_log(job_id, 'ZIP_CREATED')
+            contents = []
+            # iterate top-level entries and record per-album files without random parents
+            for entry in job_dir.iterdir():
+                # skip helper files
+                if entry.name in ('archive.txt', 'error.txt'):
+                    continue
+                if entry.is_dir():
+                    for f in entry.rglob('*'):
+                        if f.is_file():
+                            # only include .m4a audio files and common images
+                            if f.suffix.lower() != '.m4a' and f.suffix.lower() not in ('.jpg', '.jpeg', '.png'):
+                                continue
+                            try:
+                                rel = Path(entry.name) / f.relative_to(entry)
+                                contents.append((str(rel), str(f)))
+                                added_count += 1
+                            except Exception:
+                                logger.exception('Failed to record file %s for job %s', f, job_id)
+                elif entry.is_file():
+                    try:
+                        if entry.suffix.lower() not in ('.m4a', '.jpg', '.jpeg', '.png'):
+                            continue
+                        contents.append((entry.name, str(entry)))
+                        added_count += 1
+                    except Exception:
+                        logger.exception('Failed to record file %s for job %s', entry, job_id)
+            # store contents in memory for on-demand streaming later
             if added_count > 0:
-                self.job_zip_paths[job_id] = zip_path
-                # notify immediately that the ZIP is ready for download
-                await self.emit_log(job_id, f'ZIP_READY:{zip_path.name}')
+                self.job_contents[job_id] = contents
+                await self.emit_log(job_id, 'ZIP_CREATED')
+                await self.emit_log(job_id, f'ZIP_READY:music_{job_id}.zip')
             else:
-                # signal empty so client shows helpful message
+                await self.emit_log(job_id, 'ZIP_CREATED')
                 await self.emit_log(job_id, 'ZIP_READY:empty')
         except Exception as e:
-            logger.exception('Failed to create ZIP for job %s: %s', job_id, e)
-            await self.emit_log(job_id, f'Failed to create ZIP: {e}')
+            logger.exception('Failed to prepare ZIP contents for job %s: %s', job_id, e)
+            await self.emit_log(job_id, f'Failed to prepare ZIP: {e}')
 
         await self.emit_log(job_id, '__DONE__')
         # remove this job from active queues so admin list clears
@@ -588,39 +719,57 @@ async def download_album(album_id: int):
         album = get_album(db_conn, album_id)
         if not album:
             return {'status': 'not_found'}
-        # create a zip in OUTPUT_ROOT named after the album
+        # Stream a temporary zip built on-demand from DB-listed files
         safe_name = sanitize_filename(album.get('name') or f'album_{album_id}')
         zip_name = f"{safe_name}.zip"
-        zip_path = OUTPUT_ROOT / zip_name
         added = 0
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for s in album.get('songs', []):
-                fp = Path(s.get('filepath') or '')
-                if not fp.exists():
-                    # try album directory fallback
-                    adir = album.get('directory')
-                    if adir:
-                        alt = Path(adir) / s.get('filename')
-                        if alt.exists():
-                            fp = alt
-                if fp and fp.exists():
-                    arcname = fp.name
-                    try:
-                        zf.write(fp, arcname=arcname)
-                        added += 1
-                    except Exception:
-                        logger.exception('Failed to add %s to album zip %s', fp, zip_path)
-        if added == 0:
-            return {'status': 'empty'}
         try:
-            # persist zip path to album record
-            try:
-                update_album_zip(db_conn, album.get('id'), str(zip_path))
-            except Exception:
-                logger.exception('Failed to update album zip path for album %s', album.get('id'))
-        except Exception:
-            pass
-        return FileResponse(str(zip_path), filename=zip_name, media_type='application/zip')
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+            tmp_name = tmp.name
+            tmp.close()
+            with zipfile.ZipFile(tmp_name, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for s in album.get('songs', []):
+                    fp = Path(s.get('filepath') or '')
+                    if not fp.exists():
+                        # try album directory fallback
+                        adir = album.get('directory')
+                        if adir:
+                            alt = Path(adir) / s.get('filename')
+                            if alt.exists():
+                                fp = alt
+                    if fp and fp.exists():
+                        arcname = fp.name
+                        try:
+                            zf.write(fp, arcname=arcname)
+                            added += 1
+                        except Exception:
+                            logger.exception('Failed to add %s to album zip (temp) for album %s', fp, album_id)
+            if added == 0:
+                try:
+                    os.unlink(tmp_name)
+                except Exception:
+                    pass
+                return {'status': 'empty'}
+
+            def _stream_file(path):
+                try:
+                    with open(path, 'rb') as fh:
+                        while True:
+                            chunk = fh.read(64 * 1024)
+                            if not chunk:
+                                break
+                            yield chunk
+                finally:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+
+            headers = {'Content-Disposition': f'attachment; filename="{zip_name}"'}
+            return StreamingResponse(_stream_file(tmp_name), media_type='application/zip', headers=headers)
+        except Exception as e:
+            logger.exception('download_album streaming error: %s', e)
+            return {'error': str(e)}
     except Exception as e:
         logger.exception('download_album error: %s', e)
         return {'error': str(e)}

@@ -44,7 +44,8 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
         outtmpl = os.path.join(output_dir, '%(title)s.%(ext)s')
 
     ydl_opts = {
-        'format': 'bestaudio/best',
+        # Prefer m4a audio where available, fall back to best audio
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'm4a',
