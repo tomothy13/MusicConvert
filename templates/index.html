@@ -27,6 +27,8 @@
     .list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
     /* Albums should be displayed as a vertical list */
     #albumsView.list{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+    /* Songs should be displayed as a vertical list/table */
+    #songsView.list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
     .item{display:flex;gap:8px;align-items:center;background:var(--card);padding:8px;border-radius:8px;color:inherit}
     .cover{width:56px;height:56px;background:rgba(255,255,255,0.02);border-radius:6px;flex:0 0 56px;object-fit:cover}
     .meta{flex:1}
@@ -223,8 +225,7 @@ async function fetchAlbums(){
     const item = document.createElement('div'); item.className='item';
     // try to pick cover from first song via API (best-effort)
     let cover = document.createElement('img'); cover.className='cover'; cover.src='';
-    if(a.songs && a.songs.length){ /* nothing */ }
-    const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${a.name}</h4><p class="small">Album</p>`;
+    const meta = document.createElement('div'); meta.className='meta'; meta.innerHTML = `<h4>${a.name}</h4><p class="small">${a.artist || 'Album'}</p>`;
     const actions = document.createElement('div'); actions.style.display='flex'; actions.style.gap='6px'; actions.innerHTML = `<a href="/download/album/${a.id}" data-dl="album" data-id="${a.id}" class="dl small">Download</a>`;
     item.appendChild(cover); item.appendChild(meta); item.appendChild(actions);
     el.appendChild(item);

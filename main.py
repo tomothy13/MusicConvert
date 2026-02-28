@@ -46,18 +46,12 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
     ydl_opts = {
         # Prefer m4a audio where available, fall back to best audio
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'm4a',
-            'preferredquality': '256',
-        }],
         # Embed metadata and thumbnails where possible (FFmpeg used under the hood)
         'writethumbnail': True,
-        'embedthumbnail': True,
+        # We'll embed thumbnails/tags using mutagen after download to ensure consistency
         'addmetadata': True,
         'prefer_ffmpeg': True,
-        # Ensure MP4 files are optimized for players (faststart) and set reasonable defaults
-        'postprocessor_args': ['-movflags', '+faststart'],
+        # Avoid extra post-processing to prevent potential audio padding issues
         'outtmpl': outtmpl,
         'ignoreerrors': True,
         'quiet': False,
@@ -95,33 +89,29 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
         logger.info("Download finished for URL: %s", url)
         # After download, attempt to write MP4 tags so players like iTunes pick them up
         try:
-            # determine target directory to search for new m4a files
+            # determine target directory to search for new m4a files (recursively)
             target_dir = album_dir if is_playlist else output_dir
-            # find m4a files created/modified during this run
+            # find all m4a/mp4 files under target_dir
             cand = []
-            for p in glob.glob(os.path.join(target_dir, '*.m4a')):
-                try:
-                    if os.path.getmtime(p) >= start_ts - 2:
-                        cand.append(p)
-                except Exception:
-                    pass
+            for p in glob.glob(os.path.join(target_dir, '**', '*.m4a'), recursive=True):
+                cand.append(p)
+            for p in glob.glob(os.path.join(target_dir, '**', '*.mp4'), recursive=True):
+                if p not in cand:
+                    cand.append(p)
 
-            # helper: load a recent thumbnail if present
+            # helper: find any thumbnail image in the target dir (prefer album-level image)
             thumb_path = None
             for ext in ('.webp', '.jpg', '.jpeg', '.png'):
-                for t in glob.glob(os.path.join(target_dir, f'*{ext}')):
-                    try:
-                        if os.path.getmtime(t) >= start_ts - 2:
-                            thumb_path = t
-                            break
-                    except Exception:
-                        pass
+                for t in glob.glob(os.path.join(target_dir, '**', f'*{ext}'), recursive=True):
+                    thumb_path = t
+                    break
                 if thumb_path:
                     break
 
             album_name = playlist_title if is_playlist else (info.get('title') or 'single')
             album_artist = info.get('uploader') or info.get('channel') or None
 
+            # Tag every discovered m4a/mp4 file to ensure metadata was written
             for fp in cand:
                 try:
                     mp4 = MP4(fp)
@@ -130,7 +120,6 @@ def download_url_to_m4a(url, output_dir='.', archive_file='archive.txt', error_f
                     cur_title = tags.get('\xa9nam', [None])[0]
                     if not cur_title:
                         stem = os.path.splitext(os.path.basename(fp))[0]
-                        # strip leading NN - or NNN - if present
                         title = re.sub(r'^\s*\d+\s*-\s*', '', stem).strip()
                         tags['\xa9nam'] = [title]
                     # Artist: prefer existing tag, otherwise use uploader

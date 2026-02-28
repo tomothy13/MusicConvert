@@ -555,6 +555,27 @@ async def api_cover(song_id: int):
         except Exception:
             logger.exception('Failed to extract cover art for song %s', song_id)
             return Response(status_code=204)
+        # fallback: try album-level art if present
+        try:
+            cur = db_conn.cursor()
+            cur.execute('SELECT album_id FROM songs WHERE id = ?', (song_id,))
+            r = cur.fetchone()
+            if r and r[0]:
+                cur.execute('SELECT art FROM albums WHERE id = ?', (r[0],))
+                ar = cur.fetchone()
+                if ar and ar[0]:
+                    data = ar[0]
+                    try:
+                        data = bytes(data)
+                    except Exception:
+                        pass
+                    if isinstance(data, (bytes, bytearray)) and data[:8].startswith(b'\x89PNG'):
+                        ctype = 'image/png'
+                    else:
+                        ctype = 'image/jpeg'
+                    return Response(content=data, media_type=ctype)
+        except Exception:
+            logger.exception('Failed to fetch album art fallback for song %s', song_id)
         return Response(status_code=204)
     except Exception as e:
         logger.exception('api_cover error: %s', e)

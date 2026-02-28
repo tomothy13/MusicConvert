@@ -139,9 +139,9 @@ def list_links(conn: sqlite3.Connection):
 
 def list_albums(conn: sqlite3.Connection):
     cur = conn.cursor()
-    cur.execute('SELECT id,name,directory,created_at FROM albums ORDER BY created_at DESC')
+    cur.execute('SELECT id,name,directory,artist,created_at FROM albums ORDER BY created_at DESC')
     rows = cur.fetchall()
-    return [dict(id=r[0], name=r[1], directory=r[2], created_at=r[3]) for r in rows]
+    return [dict(id=r[0], name=r[1], directory=r[2], artist=r[3], created_at=r[4]) for r in rows]
 
 
 def list_songs(conn: sqlite3.Connection):
